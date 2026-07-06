@@ -9,13 +9,12 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "build:win": "vite build && electron-builder --win --config",
-    "build:mac": "vite build && electron-builder --mac --config",
-    "build:linux": "vite build && electron-builder --linux --config",
+    "build:win": "vite build && electron-builder --win --publish never",
+    "build:mac": "vite build && electron-builder --mac --publish never",
+    "build:linux": "vite build && electron-builder --linux --publish never",
     "postinstall": "echo skipping"
   },
   "build": {
-    "publish": [],
     "appId": "com.yasser.build-agent",
     "productName": "Bowow",
     "directories": {
