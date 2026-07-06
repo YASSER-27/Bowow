@@ -11,7 +11,6 @@
 <a href="README.ar.md">العربية</a> 
 </p>
 
-
 >Usage
 
 >1. Launch the app and open the Settings panel to configure your AI provider and API key, and click done.
