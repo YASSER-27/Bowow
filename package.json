@@ -15,7 +15,7 @@
     "postinstall": "echo skipping"
   },
   "build": {
-    "publish": "never",
+    "publish": [],
     "appId": "com.yasser.build-agent",
     "productName": "Bowow",
     "directories": {
