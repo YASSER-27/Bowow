@@ -1,11 +1,25 @@
-# هذا السكربت يحمل النسخة الجاهزة من GitHub Releases
 $ErrorActionPreference = 'Stop'
-Write-Host "Downloading Bowow..." -ForegroundColor Cyan
+Write-Host "Checking for the latest Bowow release..." -ForegroundColor Cyan
 
-# ملاحظة: هذا الرابط سيعمل بعد أن ترفع أول Release لمشروعك
-$url = "https://github.com/YASSER-27/Bowow/releases/latest/download/Bowow-Setup.exe"
-$dest = "$env:TEMP\Bowow-Setup.exe"
+# جلب بيانات آخر إصدار تلقائياً عبر API الخاص بـ GitHub
+$repo = "YASSER-27/Bowow"
+$latestRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases/latest"
 
+
+$asset = $latestRelease.assets | Where-Object { $_.name -like "*.exe" } | Select-Object -First 1
+
+if (-not $asset) {
+    Write-Error "Could not find any .exe installer in the latest release!"
+    exit
+}
+
+$url = $asset.browser_download_url
+$dest = "$env:TEMP\$($asset.name)"
+
+Write-Host "Downloading $($asset.name) from GitHub..." -ForegroundColor Cyan
 Invoke-WebRequest -Uri $url -OutFile $dest
+
+Write-Host "Launching installer, please complete the setup..." -ForegroundColor Cyan
 Start-Process -FilePath $dest -Wait
-Write-Host "Installation Finished!" -ForegroundColor Green
+
+Write-Host "Bowow Installation Finished Successfully! ◼" -ForegroundColor Green
