@@ -21,7 +21,6 @@
     "directories": {
       "output": "release"
     },
-    "afterPack": "build/afterPack.js",
     "win": {
       "target": ["nsis"],
       "icon": "assets/icon.ico"
