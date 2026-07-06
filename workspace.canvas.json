@@ -1,0 +1,25 @@
+{
+  "nodes": [
+    {
+      "id": "README.md",
+      "name": "README.md",
+      "x": 60,
+      "y": 60,
+      "preview": ""
+    },
+    {
+      "id": "README.ar.md",
+      "name": "README.ar.md",
+      "x": 320,
+      "y": 60,
+      "preview": "Bowow - وكيل البناء الذكي"
+    }
+  ],
+  "conns": [
+    {
+      "from": "README.md",
+      "to": "README.ar.md"
+    }
+  ],
+  "removed": []
+}
