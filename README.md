@@ -3,7 +3,7 @@
   <h1 align="center">Bowow (BETA) </h1>
 <p align="center">The open source AI coding agent.</p>
 <p align="center">
-  <img src="assets_img/16469020.png" width="500" alt="Logo">
+  <img src="assets_img/16469020.png" width="800" alt="Logo">
 </p>
 
 <p align="center">
@@ -20,10 +20,13 @@
 >5. Use F10 to toggle split-screen mode for multi-session management.
 >6. For close split-screen Use F10 not (X)
 
+##  split-screen mode (F10)
 
 <p align="center">
-  <img src="assets_img/gif_bowow.gif" width="600" alt="Logo">
+  <img src="assets_img/gif_bowow.gif" width="800" alt="Logo">
 </p>
+
+#### Bowow sample and esay
 
 ## Features
 
