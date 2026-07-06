@@ -82,3 +82,7 @@ npm run build:linux
 MIT
 
 BOWOW BY [YASSER-27](https://github.com/YASSER-27)
+
+<p align="center">
+  <img src="assets_img/bowow.png" width="70" alt="Logo">
+</p>
