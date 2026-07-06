@@ -44,6 +44,8 @@
 ### Installation
 ```bash
 git clone https://github.com/YASSER-27/Bowow.git
+or
+irm https://raw.githubusercontent.com/YASSER-27/Bowow/main/scripts/install.ps1 | iex
 ```
 
 ```bash
