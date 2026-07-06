@@ -1,16 +1,34 @@
 name: Build and Release
 on: [push]
+
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      
       - run: npm install
-      - run: npm run build:win
+      
+      - name: Build Windows
+        if: matrix.os == 'windows-latest'
+        run: npm run build:win
+        
+      - name: Build Linux
+        if: matrix.os == 'ubuntu-latest'
+        run: npm run build:linux
+        
+      - name: Build Mac
+        if: matrix.os == 'macos-latest'
+        run: npm run build:mac
+        
       - uses: actions/upload-artifact@v4
         with:
-          name: windows-build
+          name: build-${{ matrix.os }}
           path: release/
