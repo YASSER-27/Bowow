@@ -3,7 +3,7 @@
   <h1 align="center">Bowow (BETA) </h1>
 <p align="center">The open source AI coding agent.</p>
 <p align="center">
-  <img src="assets_img/16469020.png" width="800" alt="Logo">
+  <img src="assets_img/16469020.png" width="700" alt="Logo">
 </p>
 
 <p align="center">
