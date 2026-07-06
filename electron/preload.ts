@@ -8,9 +8,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   selectProjectDir: () => ipcRenderer.invoke('select-project-dir'),
   selectDirectory: () => ipcRenderer.invoke('select-directory'),
   openFile: (path: string) => ipcRenderer.invoke('open-file', path),
-  startServer: () => ipcRenderer.invoke('start-server'),
-  stopServer: () => ipcRenderer.invoke('stop-server'),
-  isServerRunning: () => ipcRenderer.invoke('is-server-running'),
+
   getNewComponentsPath: () => ipcRenderer.invoke('get-new-components-path'),
   saveDesignerImage: (projectId: string, fileName: string, base64: string) => ipcRenderer.invoke('save-designer-image', projectId, fileName, base64),
   getDesignerProjectPath: (projectId: string) => ipcRenderer.invoke('get-designer-project-path', projectId),
@@ -28,4 +26,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   windowClose: () => ipcRenderer.send('window-close'),
   toggleFullScreen: () => ipcRenderer.send('toggle-fullscreen'),
   isFullScreen: () => ipcRenderer.invoke('is-fullscreen'),
+  checkForUpdate: () => ipcRenderer.invoke('check-for-update'),
+  downloadUpdate: () => ipcRenderer.invoke('download-update'),
+  installUpdate: () => ipcRenderer.invoke('install-update'),
+  onUpdateStatus: (callback: (status: any) => void) => {
+    ipcRenderer.on('update-status', (_event, status) => callback(status))
+  },
 })

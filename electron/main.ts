@@ -1,7 +1,7 @@
 ﻿import { app, BrowserWindow, Menu, nativeImage, ipcMain, dialog, shell } from 'electron'
+import { autoUpdater } from 'electron-updater'
 import path from 'node:path'
-import { spawn, ChildProcess, exec } from 'node:child_process'
-import net from 'node:net'
+import { exec } from 'node:child_process'
 import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
 import WebSocket from 'ws'
@@ -15,45 +15,6 @@ const VITE_DEV_SERVER_URL = process.env['VITE_DEV_SERVER_URL']
 
 const iconPath = path.join(__dirname, '../src/assets/icon.png')
 const appIcon = nativeImage.createFromPath(iconPath)
-
-let serverProcess: ChildProcess | null = null
-const CPP_DIR = app.isPackaged
-  ? path.join(process.resourcesPath, 'cpp')
-  : path.join(__dirname, '../cpp')
-
-function checkPort(port: number): Promise<boolean> {
-  return new Promise(resolve => {
-    const s = net.createConnection(port, '127.0.0.1', () => { s.destroy(); resolve(true) })
-    s.on('error', () => resolve(false))
-  })
-}
-
-ipcMain.handle('start-server', async () => {
-  if (serverProcess) return 'already-running'
-  const exePath = path.join(CPP_DIR, 'llama-server.exe')
-  const modelPath = path.join(CPP_DIR, 'DeepSeek.gguf')
-  try {
-    serverProcess = spawn(exePath, ['-m', modelPath, '--port', '8080', '-ngl', '999', '-t', '8', '-c', '4096'], {
-      cwd: CPP_DIR,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true,
-    })
-    serverProcess.stdout?.on('data', () => {})
-    serverProcess.stderr?.on('data', () => {})
-    serverProcess.on('exit', () => { serverProcess = null })
-    return 'started'
-  } catch {
-    return 'failed'
-  }
-})
-
-ipcMain.handle('stop-server', () => {
-  if (serverProcess) { serverProcess.kill(); serverProcess = null }
-})
-
-ipcMain.handle('is-server-running', async () => {
-  return await checkPort(8080)
-})
 
 ipcMain.handle('read-file', async (_event, filePath: string) => {
   return await fs.readFile(filePath, 'utf-8')
@@ -248,7 +209,7 @@ ipcMain.handle('get-build-directory', async () => {
 ipcMain.handle('write-build-file', async (_event, { filePath, content, projectDir }) => {
   const targetDir = projectDir || path.join(app.getPath('userData'), 'build-beta')
   const fullPath = path.isAbsolute(filePath) ? filePath : path.join(targetDir, filePath)
-  await fs.mkdir(path.dirname(fullPath), { recursive: true })
+  try { await fs.mkdir(path.dirname(fullPath), { recursive: true }) } catch { /* OK */ }
   await fs.writeFile(fullPath, content, 'utf-8')
   return true
 })
@@ -324,6 +285,7 @@ function createWindow() {
     minWidth: 400,
     minHeight: 500,
     frame: false,
+    roundedCorners: true,
     backgroundColor: '#121212',
     icon: appIcon,
     title: 'Bowow Beta',
@@ -357,13 +319,57 @@ function createWindow() {
   })
 }
 
+// ── Auto Update ──
+autoUpdater.autoDownload = false
+autoUpdater.autoInstallOnAppQuit = false
+
+autoUpdater.on('checking-for-update', () => {
+  mainWindow?.webContents.send('update-status', { status: 'checking' })
+})
+
+autoUpdater.on('update-available', (info) => {
+  mainWindow?.webContents.send('update-status', { status: 'available', version: info.version, releaseDate: info.releaseDate, releaseNotes: info.releaseNotes })
+})
+
+autoUpdater.on('update-not-available', () => {
+  mainWindow?.webContents.send('update-status', { status: 'not-available' })
+})
+
+autoUpdater.on('download-progress', (progress) => {
+  mainWindow?.webContents.send('update-status', { status: 'downloading', percent: progress.percent, bytesPerSecond: progress.bytesPerSecond })
+})
+
+autoUpdater.on('update-downloaded', (info) => {
+  mainWindow?.webContents.send('update-status', { status: 'downloaded', version: info.version })
+})
+
+autoUpdater.on('error', (err) => {
+  const isNoRelease = err.message?.includes('latest.yml') || err.message?.includes('404')
+  mainWindow?.webContents.send('update-status', {
+    status: 'error',
+    message: isNoRelease ? 'No published release found on GitHub. Publish a release first.' : err.message,
+  })
+})
+
+ipcMain.handle('check-for-update', async () => {
+  autoUpdater.checkForUpdates()
+})
+
+ipcMain.handle('download-update', async () => {
+  autoUpdater.downloadUpdate()
+})
+
+ipcMain.handle('install-update', async () => {
+  autoUpdater.quitAndInstall()
+})
+
 app.whenReady().then(() => {
   Menu.setApplicationMenu(null)
   createWindow()
-})
-
-app.on('before-quit', () => {
-  if (serverProcess) { serverProcess.kill(); serverProcess = null }
+  // Check for updates silently on start (production only)
+  if (app.isPackaged) {
+    setTimeout(() => autoUpdater.checkForUpdates().catch(() => {}), 5000)
+  }
 })
 
 app.on('window-all-closed', () => {

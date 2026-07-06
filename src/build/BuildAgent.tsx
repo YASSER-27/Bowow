@@ -1,6 +1,6 @@
-import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
+import { useState, useRef, useCallback, useEffect, useMemo, memo } from 'react'
 import JSZip from 'jszip'
-import { useAppStore, buildAbortControllers } from '../store'
+import { useAppStore, buildAbortControllers, loadSavedConversation } from '../store'
 import type { BuildFile, BuildFileEvent, BuildToolCall, BuildTimelineItem } from '../types'
 import { BuildError, BuildErrorReason } from '../types'
 import { SvgIcon, fileSvgName } from '../data/svg/icons'
@@ -34,7 +34,11 @@ import SettingsModal from '../SettingsModal/SettingsModal'
 import yasserPic from '../assets/yasser.jpg'
 import animationGif from '../assets/animation.gif'
 
-const MarkdownContent = ({ content, color }: { content: string; color: string }) => {
+function isRTL(text: string): boolean {
+  return /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/.test(text)
+}
+
+const MarkdownContent = memo(({ content, color }: { content: string; color: string }) => {
   const cleaned = content.replace(/<\/?plan>/gi, '').trim()
   if (!cleaned) return null
   const parts: { type: 'text' | 'code' | 'bold' | 'italic'; content: string; lang?: string }[] = []
@@ -60,6 +64,7 @@ const MarkdownContent = ({ content, color }: { content: string; color: string })
     </div>
   )
 }
+)
 
 const TOOL_DEFS = [
   {
@@ -282,7 +287,7 @@ const TOOL_DEFS = [
   },
 ]
 
-function buildSystemPrompt(provider: string): string {
+function buildSystemPrompt(provider: string, customPrompt?: string): string {
   const base = `You are a file-building agent that communicates ONLY through tool calls. Your job is to create, read, edit, and verify files using the available tool calls.
 
 CRITICAL RULE — ABSOLUTELY NO TEXT OUTPUT BETWEEN TOOL CALLS:
@@ -326,11 +331,13 @@ PROJECT STRUCTURE:
 - All files are stored under the project root directory.
 - For HTML projects, put all CSS inline in <style> tags and all JS inline in <script> tags inside a single .html file unless the user explicitly asks for separate files.`
 
+  const customNote = customPrompt ? `\n\nUSER INSTRUCTIONS:\n${customPrompt}` : ''
+
   const jsonFallbackNote = (provider === 'llama' || provider === 'ollama')
     ? `\n\nOUTPUT FORMAT (one tool call per response):\n{"name":"create_file","args":{"path":"src/index.html","content":"<h1>Hello</h1>"}}`
     : ''
 
-  return base + jsonFallbackNote
+  return base + customNote + jsonFallbackNote
 }
 
 // Available tools:
@@ -505,11 +512,10 @@ function nextId() { return crypto.randomUUID?.() || `tl-${Date.now()}-${Math.ran
 
 export default function BuildAgent({ buildId }: { buildId: number }) {
   const sessionId = useMemo(() => getUniqueId(), [])
-  const builds = useAppStore(s => s.builds)
+  const buildData = useAppStore(s => s.builds[buildId])
   const activeBuild = useAppStore(s => s.activeBuild)
-  const buildData = builds[buildId]
-  const buildProjectFiles = buildData?.projectFiles || []
-  const timeline = buildData?.timeline || []
+  const buildProjectFiles = buildData?.projectFiles ?? []
+  const timeline = buildData?.timeline ?? []
   const addBuildFile = useAppStore(s => s.addBuildFile)
   const updateBuildFile = useAppStore(s => s.updateBuildFile)
   const setBuildIsRunning = useAppStore(s => s.setBuildIsRunning)
@@ -521,6 +527,7 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
   const setApiModel = useAppStore(s => s.setApiModel)
   const buildWorkDir = useAppStore(s => s.builds[buildId]?.workDir ?? null)
   const setBuildWorkDir = useAppStore(s => s.setBuildWorkDir)
+  const userPrompts = useAppStore(s => s.userPrompts)
   // Map each user message to subsequent file paths+ids (until next user message)
   const userFileMap = useMemo(() => {
     const map = new Map<string, { paths: string[]; fileIds: string[] }>()
@@ -533,6 +540,7 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
     }
     return map
   }, [timeline])
+  const userTimeline = useMemo(() => timeline.filter(i => i.type === 'user'), [timeline])
   const addTimelineItem = useAppStore(s => s.addBuildTimelineItem)
   const updateTimelineItem = useAppStore(s => s.updateBuildTimelineItem)
   const removeTimelineItem = useAppStore(s => s.removeBuildTimelineItem)
@@ -558,6 +566,7 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
   const [dragOver, setDragOver] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [showInfo, setShowInfo] = useState(false)
+  const [fullImage, setFullImage] = useState<string | null>(null)
   const [showModelPicker, setShowModelPicker] = useState(false)
   const [collapsedItems, setCollapsedItems] = useState<Set<string>>(new Set())
   const toggleCollapse = (id: string) => {
@@ -628,7 +637,7 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
 
   // ── Tool execution ──
 
-  /** Scan real filesystem and sync into buildProjectFiles store */
+  /** Scan real filesystem and sync file paths into store (no content) */
   const syncFromDisk = useCallback(async () => {
     if (!window.electronAPI) return
     try {
@@ -636,18 +645,16 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
       const workDir = store.builds[buildId]?.workDir
       const buildDir = (workDir || await window.electronAPI.getBuildDirectory()).replace(/\\/g, '/')
       const files = await window.electronAPI.readDirRecursive(buildDir)
+      const relPaths: string[] = []
       for (const rawPath of files) {
         const normalized = rawPath.replace(/\\/g, '/')
         const relPath = normalized.startsWith(buildDir + '/')
           ? normalized.slice(buildDir.length + 1)
           : normalized
         if (!relPath) continue
-        const s2 = useAppStore.getState()
-        if (!s2.builds[buildId].projectFiles.find(f => f.path === relPath)) {
-          const content = await window.electronAPI.readFile(rawPath)
-          s2.addBuildFile(buildId, { path: relPath, content })
-        }
+        relPaths.push(relPath)
       }
+      useAppStore.getState().syncBuildFileListing(buildId, relPaths)
     } catch (e) {
       console.debug('[BuildAgent] syncFromDisk:', e)
     }
@@ -741,8 +748,12 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
       const state = useAppStore.getState()
       try {
         const regex = new RegExp(pattern)
-        const results = state.builds[buildId].projectFiles.flatMap(f => {
-          const lines = f.content.split('\n')
+        const files = state.builds[buildId].projectFiles
+        const loadIfNeeded = async (f: BuildFile) =>
+          f.contentLoaded ? f.content || '' : state.loadBuildFileContent(buildId, f.path)
+        const results = (await Promise.all(files.map(async f => {
+          const content = await loadIfNeeded(f)
+          const lines = content.split('\n')
           const matches: string[] = []
           for (let i = 0; i < lines.length; i++) {
             if (regex.test(lines[i])) {
@@ -750,7 +761,7 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
             }
           }
           return matches
-        })
+        }))).flat()
         const listing = results.length ? results.join('\n') : '(no matches)'
         return { action: 'read', path: `grep:${pattern}`, stats: { added: 0, removed: 0 }, status: 'success', content: listing }
       } catch {
@@ -768,7 +779,11 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
       try {
         const zip = new JSZip()
         for (const file of files) {
-          zip.file(file.path, file.content)
+          let fc = file.content || ''
+          if (!file.contentLoaded) {
+            fc = await useAppStore.getState().loadBuildFileContent(buildId, file.path)
+          }
+          zip.file(file.path, fc)
         }
         const zipBlob = await zip.generateAsync({ type: 'blob' })
         const arrayBuffer = await zipBlob.arrayBuffer()
@@ -800,7 +815,10 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
     if (tc.name === 'create_file') {
       const content = tc.arguments.content || ''
       const lines = content.split('\n').length
-      const oldContent = existing ? existing.content : ''
+      let oldContent = existing ? existing.content || '' : ''
+      if (existing && !existing.contentLoaded) {
+        oldContent = await useAppStore.getState().loadBuildFileContent(buildId, path)
+      }
       // Save checkpoint for undo
       if (existing) saveCheckpoint(buildId, path, oldContent)
       await withFileMutationQueue(path, async () => {
@@ -842,8 +860,12 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
       if (!existing) return { action: 'read', path, stats: { added: 0, removed: 0 }, status: 'error', error: 'File not found' }
       const startLine = tc.arguments.start_line ? parseInt(tc.arguments.start_line) : undefined
       const endLine = tc.arguments.end_line ? parseInt(tc.arguments.end_line) : undefined
-      
-      let content = existing.content
+
+      let content = existing.content || ''
+      // Lazy-load from disk if content not yet loaded
+      if (!existing.contentLoaded) {
+        content = await useAppStore.getState().loadBuildFileContent(buildId, path)
+      }
       if (startLine !== undefined || endLine !== undefined) {
         const lines = content.split('\n')
         const start = startLine !== undefined ? Math.max(1, startLine) - 1 : 0
@@ -885,15 +907,20 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
       const state = useAppStore.getState()
       const files = state.builds[buildId].projectFiles
       
+      const loadContent = (f: BuildFile) =>
+        f.contentLoaded ? f.content || '' : state.loadBuildFileContent(buildId, f.path)
+
       let map: Record<string, string[]> = {}
       const mapFile = files.find(f => f.path === 'project_map.json')
       if (mapFile) {
-        try { map = JSON.parse(mapFile.content) } catch {}
+        const mapContent = await loadContent(mapFile)
+        try { map = JSON.parse(mapContent) } catch {}
       }
 
       const results: string[] = []
       for (const file of files) {
-        if (file.path.toLowerCase().includes(query) || file.content.toLowerCase().includes(query)) {
+        const fc = file.path.toLowerCase().includes(query) ? '' : await loadContent(file)
+        if (file.path.toLowerCase().includes(query) || fc.toLowerCase().includes(query)) {
           results.push(file.path)
         }
       }
@@ -922,7 +949,11 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
       const map: Record<string, string[]> = {}
       
       for (const file of files) {
-        const imports = [...file.content.matchAll(/(?:import|require)[\s\S]+?["']\.\/?([^"']+)["']/g)].map(m => m[1])
+        let fc = file.content || ''
+        if (!file.contentLoaded) {
+          fc = await state.loadBuildFileContent(buildId, file.path)
+        }
+        const imports = [...fc.matchAll(/(?:import|require)[\s\S]+?["']\.\/?([^"']+)["']/g)].map(m => m[1])
         map[file.path] = imports
       }
       
@@ -982,7 +1013,10 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
     const oldStr = tc.arguments.old_str || ''
     const newStr = tc.arguments.new_str || ''
     const replaceAll = tc.arguments.replace_all === 'true'
-    const oldFull = existing.content
+    let oldFull = existing.content || ''
+    if (!existing.contentLoaded) {
+      oldFull = await useAppStore.getState().loadBuildFileContent(buildId, path)
+    }
 
     try {
       // Strip BOM, normalize line endings, then apply edits
@@ -1534,8 +1568,7 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
           if (lines.length > 30) previewContent += '\n...'
         }
         const isHtml = ev.path?.endsWith('.html')
-        const fullContent = isHtml && tc.name === 'create_file' ? ((tc.arguments as any).content || '')
-          : isHtml && tc.name === 'edit_file' ? (useAppStore.getState().builds[buildId].projectFiles.find(f => f.path === ev.path)?.content || '')
+        const fullContent = isHtml && (tc.name === 'create_file' || tc.name === 'edit_file') ? (ev.content || '')
             : undefined
         updateTimelineItem(buildId, pendingIds[i], {
           path: ev.path, action: ev.action, stats: ev.stats, status: ev.status, error: ev.error,
@@ -1636,18 +1669,18 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
           type: 'user', id: nextId(),
           content: `Working directory set to: \`${dir}\``,
         })
-        // Load files from the new directory into project files
-        const state = useAppStore.getState()
-        const files = await window.electronAPI.readDirRecursive(dir)
-        for (const rawPath of files) {
-          const normalized = rawPath.replace(/\\/g, '/')
-          const relPath = normalized.startsWith(dir.replace(/\\/g, '/') + '/')
-            ? normalized.slice(dir.replace(/\\/g, '/').length + 1)
-            : normalized
+        // List files from the new directory (paths only — content loaded on demand)
+        const dirNorm = dir.replace(/\\/g, '/')
+        const rawFiles = await window.electronAPI.readDirRecursive(dir)
+        const relPaths: string[] = []
+        for (const rawPath of rawFiles) {
+          const normPath = rawPath.replace(/\\/g, '/')
+          const relPath = normPath.startsWith(dirNorm + '/') ? normPath.slice(dirNorm.length + 1) : normPath
           if (!relPath || relPath.startsWith('.git/') || relPath.startsWith('node_modules/')) continue
-          const content = await window.electronAPI.readFile(rawPath)
-          state.addBuildFile(buildId, { path: relPath, content })
+          relPaths.push(relPath)
         }
+        const state = useAppStore.getState()
+        state.syncBuildFileListing(buildId, relPaths)
       }
       return
     }
@@ -1764,7 +1797,7 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
       : 'No files exist in this project yet.'
 
     conversationRef.current = [
-      { role: 'system', content: buildSystemPrompt(apiSettings.provider) + '\n\n' + fileList },
+      { role: 'system', content: buildSystemPrompt(apiSettings.provider, useAppStore.getState().systemPrompt) + '\n\n' + fileList },
       ...useAppStore.getState().builds[buildId].timeline.filter(t => t.type !== 'file').map(t => ({
         role: t.type === 'user' ? 'user' as const : 'assistant' as const,
         content: t.content || '',
@@ -1978,7 +2011,10 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
   const handleSaveFileToPC = useCallback(async (path: string, content?: string) => {
     const state = useAppStore.getState()
     const file = state.builds[buildId].projectFiles.find(f => f.path === path)
-    const data = content || file?.content
+    let data = content
+    if (!data && file) {
+      data = file.contentLoaded ? file.content : await state.loadBuildFileContent(buildId, path)
+    }
     if (!data) return
     const api = window.electronAPI
     if (api?.saveBuildFile) {
@@ -2008,6 +2044,18 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
       textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 120) + 'px'
     }
   }, [input])
+
+  // Load saved conversation on mount — only if timeline is empty to avoid duplicate keys
+  useEffect(() => {
+    const saved = loadSavedConversation(buildId)
+    if (saved && saved.timeline && saved.timeline.length > 0 && timeline.length === 0) {
+      const state = useAppStore.getState()
+      for (const item of saved.timeline) {
+        state.addBuildTimelineItem(buildId, item as BuildTimelineItem)
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [buildId])
 
   const handleRevert = (item: BuildTimelineItem) => {
     setInput(item.content || '')
@@ -2048,12 +2096,19 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
       state.removeBuildTimelineItem(buildId, timeline[i].id)
     }
 
-    // Restore files to their previous state
+    // Restore files to their previous state (store + actual filesystem)
+    const workDir = build.workDir
     for (const [path, content] of prevVersions) {
       if (content === '') {
         state.removeBuildFile(buildId, path)
+        if (workDir) {
+          window.electronAPI?.writeBuildFile({ filePath: path, content: '' }).catch(() => {})
+        }
       } else {
         state.updateBuildFile(buildId, path, content)
+        if (workDir) {
+          window.electronAPI?.writeBuildFile({ filePath: path, content }).catch(() => {})
+        }
       }
     }
 
@@ -2091,15 +2146,22 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
         }
       `}</style>
       <div className="build-agent-root" style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden', position: 'relative' }}>
-      <div style={{ height: 28, WebkitAppRegion: 'drag' as any, background: '#121212', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 2, paddingRight: 4 }}>
+      <div style={{ height: 28, WebkitAppRegion: 'drag' as any, background: '#121212', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 2, padding: '0 4px' }}>
+        <div style={{ flex: 1 }} />
+        <span style={{ color: '#999', fontSize: 11, fontWeight: 600, letterSpacing: 2.5, userSelect: 'none' }}>BOWOW</span>
+        <div style={{ display: 'flex', gap: 4, flex: 1, justifyContent: 'flex-end' }}>
         <button onClick={() => window.electronAPI?.windowMinimize()}
-          style={{ WebkitAppRegion: 'no-drag' as any, border: 'none', background: 'transparent', color: '#888', cursor: 'pointer', fontSize: 'var(--font-sm)', padding: '2px 6px', borderRadius: 3 }}
+          style={{ WebkitAppRegion: 'no-drag' as any, border: 'none', background: 'transparent', color: '#fff', cursor: 'pointer', fontSize: 'var(--font-sm)', padding: '2px 6px', borderRadius: 3 }}
           title="Minimize">─</button>
-        <button onClick={() => window.electronAPI?.windowClose()}
-          style={{ WebkitAppRegion: 'no-drag' as any, border: 'none', background: 'transparent', color: '#888', cursor: 'pointer', fontSize: 'var(--font-sm)', padding: '2px 6px', borderRadius: 3 }}
+        <button onClick={() => window.electronAPI?.windowMaximize()}
+          style={{ WebkitAppRegion: 'no-drag' as any, border: 'none', background: 'transparent', color: '#fff', cursor: 'pointer', fontSize: 'var(--font-sm)', padding: '2px 6px', borderRadius: 3 }}
+          title="Maximize">□</button>
+        <button onClick={() => { if (window.confirm('Are you sure you want to exit?')) window.electronAPI?.windowClose() }}
+          style={{ WebkitAppRegion: 'no-drag' as any, border: 'none', background: 'transparent', color: '#fff', cursor: 'pointer', fontSize: 'var(--font-sm)', padding: '2px 6px', borderRadius: 3 }}
           title="Close">✕</button>
       </div>
-      <div ref={buildOutputRef} style={{ flex: 1, overflow: 'hidden auto', padding: '4px 0', position: 'relative', maxWidth: 800, margin: '0 auto', width: '100%' }}>
+      </div>
+      <div ref={buildOutputRef} style={{ flex: 1, overflow: 'hidden auto', padding: showSettings ? 0 : '4px 0', position: 'relative', maxWidth: showSettings ? 'none' : 800, margin: showSettings ? 0 : '0 auto', width: '100%' }}>
         {showSettings ? (
           <SettingsModal inline onClose={() => setShowSettings(false)} />
         ) : (<>
@@ -2182,7 +2244,8 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
                     item.path && /\.(png|jpg|jpeg|gif|webp|svg|bmp|ico)$/i.test(item.path) && (
                       <div style={{ marginTop: 4, borderTop: '1px solid #2a2a2a', paddingTop: 4 }}>
                         <img src={item.content.startsWith('data:') ? item.content : `data:image/${item.path.split('.').pop()?.toLowerCase() === 'svg' ? 'svg+xml' : item.path.split('.').pop()?.toLowerCase() || 'png'};base64,${item.content}`}
-                          style={{ maxWidth: '100%', maxHeight: 240, borderRadius: 4, display: 'block' }} />
+                          onClick={() => setFullImage(item.content.startsWith('data:') ? item.content : `data:image/${item.path.split('.').pop()?.toLowerCase() === 'svg' ? 'svg+xml' : item.path.split('.').pop()?.toLowerCase() || 'png'};base64,${item.content}`)}
+                          style={{ maxWidth: '100%', maxHeight: 240, borderRadius: 4, display: 'block', cursor: 'pointer' }} />
                       </div>
                     )
                   )}
@@ -2219,9 +2282,9 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
                          title="Remove step">Delete</button>
                       </div>
                   </>)}
-                </div>
-              </div>
-            )
+                    </div>
+    </div>
+  )
           }
           return (
             <div key={item.id} ref={setItemRef}>
@@ -2254,35 +2317,35 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
                       </div>
                     ) : (
                       item.content && (
-                        <div style={{ margin: '4px 8px', padding: '8px 10px', borderRadius: 6, fontSize: 'var(--font-md)', lineHeight: 1.5, border: '1px solid #2a2a2a', background: '#121212' }}>
-                          <MarkdownContent content={item.content} color="#c0c0c6" />
+                        <div style={{ margin: '4px 8px', padding: '8px 10px', borderRadius: 6, fontSize: 'var(--font-md)', lineHeight: 1.5, background: '#121212' }}>
+                           <MarkdownContent content={item.content} color="#c0c0c6" />
                         </div>
                       )
                     )
                 ) : (
-             <div style={{
-                     margin: '2px 8px', padding: '8px 10px', borderRadius: 6, fontSize: 'var(--font-md)', lineHeight: 1.5,
-                     border: '1px solid #333', background: '#121212', height: 'auto',
-                     width: 'fit-content', marginLeft: 'auto',
-                   }}>
-                     <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
-                       <button onClick={e => { e.stopPropagation(); toggleCollapse(item.id) }}
-                         style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: '#666', fontSize: 'var(--font-sm)', padding: 0, transform: collapsedItems.has(item.id) ? 'rotate(0deg)' : 'rotate(90deg)', transition: 'transform 0.15s' }}>
-                         ▶
-                       </button>
-                       <span style={{ color: '#888', fontSize: 'var(--font-sm)', fontWeight: 500 }}>{item.type === 'user' ? 'You' : 'Assistant'}</span>
-                     </div>
-                     {!collapsedItems.has(item.id) && (item.content || item.previewContent) && (<>
-                     {item.content?.startsWith('data:image/') ? (
-                      <>
-                        <img src={item.content} style={{ maxWidth: '100%', maxHeight: 240, borderRadius: 4, display: 'block' }} />
-                        {item.previewContent && (
-                          <div style={{ marginTop: 6, color: '#888', fontSize: 'var(--font-md)', whiteSpace: 'pre-wrap' }}>{item.previewContent}</div>
-                        )}
-                      </>
-                    ) : item.type === 'user' ? (
-                      <div style={{ color: '#e0e0e6', whiteSpace: 'pre-wrap', fontSize: 'var(--font-md)', wordBreak: 'break-word' }}>{item.content}</div>
-                    ) : (
+              <div dir={isRTL(item.content || '') ? 'rtl' : 'ltr'} style={{
+                      margin: '2px 8px', padding: '8px 10px', borderRadius: 6, fontSize: 'var(--font-md)', lineHeight: 1.5,
+                      border: '1px solid #333', background: '#121212', height: 'auto',
+                      width: 'fit-content', marginLeft: 'auto', textAlign: isRTL(item.content || '') ? 'right' as const : 'left' as const,
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
+                        <button onClick={e => { e.stopPropagation(); toggleCollapse(item.id) }}
+                          style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: '#666', fontSize: 'var(--font-sm)', padding: 0, transform: collapsedItems.has(item.id) ? 'rotate(0deg)' : 'rotate(90deg)', transition: 'transform 0.15s' }}>
+                          ▶
+                        </button>
+                        <span style={{ color: '#888', fontSize: 'var(--font-sm)', fontWeight: 500 }}>{item.type === 'user' ? 'You' : 'Assistant'}</span>
+                      </div>
+                      {!collapsedItems.has(item.id) && (item.content || item.previewContent) && (<>
+                      {item.content?.startsWith('data:image/') ? (
+                       <>
+                          <img src={item.content} onClick={() => setFullImage(item.content)} style={{ maxWidth: '100%', maxHeight: 240, borderRadius: 4, display: 'block', cursor: 'pointer' }} />
+                         {item.previewContent && (
+                           <div style={{ marginTop: 6, color: '#888', fontSize: 'var(--font-md)', whiteSpace: 'pre-wrap' }}>{item.previewContent}</div>
+                         )}
+                       </>
+                     ) : item.type === 'user' ? (
+                       <div style={{ color: '#e0e0e6', whiteSpace: 'pre-wrap', fontSize: 'var(--font-md)', wordBreak: 'break-word' }}>{item.content}</div>
+                     ) : (
                       <MarkdownContent content={item.content || ''} color="#c0c0c6" />
                     )}
                       {item.type === 'user' && (
@@ -2332,13 +2395,13 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
 
       <style>{`.sd{display:flex;align-items:center;justify-content:center;width:18px;height:18px;cursor:pointer;pointer-events:auto}.sd::after{content:'';display:block;width:6px;height:2px;border-radius:2px;background:var(--sd-bg,#aaa);transition:all .2s ease}.sd:hover::after{width:14px;height:3px;background:#fff}.sd[data-has]{--sd-bg:#22c55e}.sd[data-active]::after{width:10px;height:3px;background:var(--sd-bg,#fff)}*{scrollbar-width:thin;scrollbar-color:#444 transparent}*::-webkit-scrollbar{width:6px;height:6px}*::-webkit-scrollbar-track{background:transparent}*::-webkit-scrollbar-thumb{background:#444;border-radius:3px}*::-webkit-scrollbar-thumb:hover{background:#555}.info-modal{width:380px;max-width:90vw;background:#121212;border:1px solid #2a2a2a;border-radius:12px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.6)}@keyframes shimmerBg{0%{background-position:200% 0}100%{background-position:-200% 0}}`}</style>
       {/* Scroll indicators — user messages only */}
-      {timeline.filter(i => i.type === 'user').length > 1 && (
+      {userTimeline.length > 1 && (
         <div style={{
           position: 'absolute', right: 2, top: '50%', transform: 'translateY(-50%)',
           display: 'flex', flexDirection: 'column', gap: 4,
           padding: '6px 2px', pointerEvents: 'none', zIndex: 15,
         }}>
-          {timeline.filter(i => i.type === 'user').map(item => {
+          {userTimeline.map(item => {
             const info = userFileMap.get(item.id)
             const hasFiles = info && info.paths.length > 0
             const isActive = activeMsgId === item.id
@@ -2493,19 +2556,39 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
                      </>
                    )}
                  </div>
-               )}
-              <textarea ref={textareaRef} value={input}
-                onChange={e => setInput(e.target.value)}
-                onKeyDown={handleKeyDown}
-                onPaste={handlePaste}
-                rows={1}
-                placeholder={buildWorkDir ? 'Describe what to build in ' + buildWorkDir.split(/[\\/]/).pop() + '…' : 'Ask anything... '}
-                style={{
-                  flex: 1, width: '100%', background: '#121212', border: '1px solid #333', borderRadius: 10, color: '#e0e0e6',
-                   fontSize: 'var(--font-md)', padding: '10px 42px 10px 20px', minHeight: 110, outline: 'none', resize: 'none', fontFamily: 'inherit',
-                   lineHeight: 1.9, boxSizing: 'border-box', textAlign: 'left' as const,
-                }}
-              />
+                )}
+                {userPrompts.length > 0 && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 6 }}>
+                    {userPrompts.map((p, i) => (
+                      <button key={i} onClick={() => {
+                        setInput(p)
+                        textareaRef.current?.focus()
+                      }}
+                        style={{
+                          fontSize: 'var(--font-xxs)', padding: '3px 8px', borderRadius: 4,
+                          border: '1px solid #333', background: '#1a1a1a', color: '#888',
+                          cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap',
+                          maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis',
+                        }}
+                        title={p}>
+                        {p}
+                      </button>
+                    ))}
+                  </div>
+                )}
+               <textarea ref={textareaRef} value={input}
+                 onChange={e => setInput(e.target.value)}
+                 onKeyDown={handleKeyDown}
+                 onPaste={handlePaste}
+                 rows={1}
+                 dir={isRTL(input) ? 'rtl' : 'ltr'}
+                 placeholder={buildWorkDir ? 'Describe what to build in ' + buildWorkDir.split(/[\\/]/).pop() + '…' : 'Ask anything... '}
+                 style={{
+                   flex: 1, width: '100%', background: '#121212', border: '1px solid #333', borderRadius: 10, color: '#e0e0e6',
+                    fontSize: 'var(--font-md)', padding: '10px 42px 10px 20px', minHeight: 110, outline: 'none', resize: 'none', fontFamily: 'inherit',
+                    lineHeight: 1.9, boxSizing: 'border-box', textAlign: isRTL(input) ? 'right' as const : 'left' as const,
+                 }}
+               />
               {attachmentsRef.current.size > 0 && attachVersion >= 0 && (
                 <div style={{
                   position: 'absolute', bottom: '100%', left: 4, marginBottom: 4,
@@ -2581,6 +2664,12 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
               </div>
             </div>
           </div>
+        </div>
+      )}
+      {fullImage && (
+        <div className="import-overlay" onClick={() => setFullImage(null)} style={{ zIndex: 100000, cursor: 'zoom-out' }}>
+          <img src={fullImage} onClick={e => e.stopPropagation()}
+            style={{ maxWidth: '90vw', maxHeight: '90vh', borderRadius: 8, objectFit: 'contain' }} />
         </div>
       )}
     </div>

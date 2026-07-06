@@ -37,6 +37,7 @@ export default function App() {
   }, [toggleSplit])
 
   return (
+    <div style={{ width: '100vw', height: '100vh', borderRadius: 10, overflow: 'hidden' }}>
     <div style={{
       width: '100vw', height: '100vh',
       display: 'grid',
@@ -46,6 +47,7 @@ export default function App() {
     }}>
       {/* Always render all panes — visibility toggled via CSS, components stay mounted */}
       <SplitBuildView />
+    </div>
     </div>
   )
 }

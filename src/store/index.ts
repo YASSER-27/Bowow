@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import type { BuildData, BuildTimelineItem, CanvasElement, Connection, ImportEntry, ApiSettings, ApiProvider, BuildFile } from '../types'
+import type { BuildData, BuildTimelineItem, CanvasElement, Connection, ImportEntry, ApiSettings, ApiProvider, BuildFile, CommandPermission, McpServer, TerminalPermissionEntry } from '../types'
 import { getUniqueId } from '../utils/uniqueId'
 
 export const PROVIDER_CONFIGS: Record<ApiProvider, { label: string; defaultUrl: string; defaultModel: string }> = {
@@ -58,10 +58,16 @@ interface AppState {
   imports: ImportEntry[]
   splitViewEnabled: boolean
   splitPaneBuildIds: number[]
+  terminalPermissions: TerminalPermissionEntry[]
+  userPrompts: string[]
+  mcpServers: McpServer[]
+  systemPrompt: string
 
-  addBuildFile: (buildId: number, file: { path: string; content: string }) => void
+  addBuildFile: (buildId: number, file: { path: string; content?: string; contentLoaded?: boolean }) => void
+  syncBuildFileListing: (buildId: number, paths: string[]) => void
   updateBuildFile: (buildId: number, path: string, content: string) => void
   removeBuildFile: (buildId: number, path: string) => void
+  loadBuildFileContent: (buildId: number, path: string) => Promise<string>
   setBuildIsRunning: (buildId: number, isRunning: boolean) => void
   setBuildEditingPaths: (buildId: number, paths: string[]) => void
   setBuildWorkDir: (buildId: number, dir: string | null) => void
@@ -89,27 +95,24 @@ interface AppState {
   setApiDisableReasoning: (disabled: boolean) => void
   setFavoriteModels: (models: string[]) => void
   setAvailableModels: (models: string[]) => void
+  setTerminalPermissions: (perms: TerminalPermissionEntry[]) => void
+  setUserPrompts: (prompts: string[]) => void
+  addUserPrompt: (prompt: string) => void
+  removeUserPrompt: (index: number) => void
+  addMcpServer: (server: McpServer) => void
+  removeMcpServer: (index: number) => void
+  setSystemPrompt: (prompt: string) => void
 }
 
-// Custom storage: uses Electron IPC file if available, falls back to localStorage
+// localStorage in Electron persists to disk natively — fast sync access
 const persistStorage = {
-  getItem: async (name: string): Promise<string | null> => {
-    if (window.electronAPI?.loadStoreData) {
-      return await window.electronAPI.loadStoreData()
-    }
+  getItem: (name: string): string | null => {
     try { return localStorage.getItem(name) } catch { return null }
   },
-  setItem: async (name: string, value: string): Promise<void> => {
-    const payload = typeof value === 'string' ? value : JSON.stringify(value)
-    if (window.electronAPI?.saveStoreData) {
-      await window.electronAPI.saveStoreData(payload)
-    }
-    try { localStorage.setItem(name, payload) } catch {}
+  setItem: (name: string, value: string): void => {
+    try { localStorage.setItem(name, value) } catch {}
   },
-  removeItem: async (name: string): Promise<void> => {
-    if (window.electronAPI?.saveStoreData) {
-      await window.electronAPI.saveStoreData('')
-    }
+  removeItem: (name: string): void => {
     try { localStorage.removeItem(name) } catch {}
   },
 }
@@ -117,8 +120,43 @@ const persistStorage = {
 // Global abort controllers keyed by buildId — not reactive, shared across remounts
 export const buildAbortControllers = new Map<number, AbortController>()
 
+// Debounced auto-save of build data to file (not localStorage)
+let saveTimer: any = null
+function scheduleBuildSave(builds: Record<number, BuildData>) {
+  if (saveTimer) clearTimeout(saveTimer)
+  saveTimer = setTimeout(() => {
+    try {
+      // Only save the first build's timeline (minimal data: no large file contents)
+      const b = builds[0]
+      if (!b) return
+      const slim = {
+        id: b.id,
+        name: b.name,
+        timeline: b.timeline.map(t => ({
+          id: t.id, type: t.type, content: t.content?.length > 5000 ? t.content.slice(0, 5000) + '... [truncated]' : t.content,
+          title: t.title, path: t.path, toolName: t.toolName, status: t.status,
+          tokenCount: t.tokenCount, previewContent: t.previewContent?.length > 2000 ? t.previewContent.slice(0, 2000) + '...' : t.previewContent,
+          error: t.error, diffPreview: t.diffPreview, timestamp: t.timestamp,
+        })),
+        projectFiles: b.projectFiles.map(f => ({ path: f.path })),
+        workDir: b.workDir,
+      }
+      localStorage.setItem('build-agent-conv', JSON.stringify(slim))
+    } catch {}
+  }, 2000)
+}
+
+export function loadSavedConversation(buildId: number): Partial<BuildData> | null {
+  try {
+    const raw = localStorage.getItem('build-agent-conv')
+    if (!raw) return null
+    const data = JSON.parse(raw)
+    return data.id === buildId ? data : null
+  } catch { return null }
+}
+
 export const useAppStore = create<AppState>()(persist(
-  (set) => ({
+  (set, get) => ({
   builds: { 0: initialBuildData(0) },
   activeBuild: 0,
   canvasElements: [],
@@ -127,6 +165,10 @@ export const useAppStore = create<AppState>()(persist(
   imports: [],
   splitViewEnabled: false,
   splitPaneBuildIds: [0],
+  terminalPermissions: [],
+  userPrompts: [],
+  mcpServers: [],
+  systemPrompt: '',
 
   addBuildFile: (buildId, file) => set(state => {
     const build = state.builds[buildId]
@@ -136,8 +178,27 @@ export const useAppStore = create<AppState>()(persist(
         ...state.builds,
         [buildId]: {
           ...build,
-          projectFiles: [...build.projectFiles, { id: crypto.randomUUID?.() || String(Date.now()), ...file }]
+          projectFiles: [...build.projectFiles, { id: crypto.randomUUID?.() || String(Date.now()), ...file, content: file.content || '', contentLoaded: !!file.content }]
         }
+      }
+    }
+  }),
+
+  syncBuildFileListing: (buildId, paths) => set(state => {
+    const build = state.builds[buildId]
+    if (!build) return state
+    const existing = new Set(build.projectFiles.map(f => f.path))
+    const newFiles: BuildFile[] = []
+    for (const p of paths) {
+      if (!existing.has(p)) {
+        newFiles.push({ id: crypto.randomUUID?.() || String(Date.now()), path: p, content: '', contentLoaded: false })
+      }
+    }
+    if (newFiles.length === 0) return state
+    return {
+      builds: {
+        ...state.builds,
+        [buildId]: { ...build, projectFiles: [...build.projectFiles, ...newFiles] }
       }
     }
   }),
@@ -145,12 +206,14 @@ export const useAppStore = create<AppState>()(persist(
   updateBuildFile: (buildId, path, content) => set(state => {
     const build = state.builds[buildId]
     if (!build) return state
+    const MAX_FILE_SIZE = 50000
+    const truncated = content.length > MAX_FILE_SIZE ? content.slice(0, MAX_FILE_SIZE) + '\n// ... truncated' : content
     return {
       builds: {
         ...state.builds,
         [buildId]: {
           ...build,
-          projectFiles: build.projectFiles.map(f => f.path === path ? { ...f, content } : f)
+          projectFiles: build.projectFiles.map(f => f.path === path ? { ...f, content: truncated, contentLoaded: true } : f)
         }
       }
     }
@@ -169,6 +232,38 @@ export const useAppStore = create<AppState>()(persist(
       }
     }
   }),
+
+  loadBuildFileContent: async (buildId, path) => {
+    const state = get()
+    const build = state.builds[buildId]
+    if (!build) return ''
+    const file = build.projectFiles.find(f => f.path === path)
+    if (!file) return ''
+    if (file.contentLoaded && file.content) return file.content
+    // Load from disk lazily
+    if (window.electronAPI?.readFile && build.workDir) {
+      try {
+        const fullPath = build.workDir.replace(/\\/g, '/') + '/' + path
+        const content = await window.electronAPI.readFile(fullPath)
+        const MAX_FILE_SIZE = 50000
+        const truncated = content.length > MAX_FILE_SIZE ? content.slice(0, MAX_FILE_SIZE) + '\n// ... truncated' : content
+        // Update store with loaded content
+        set(s => ({
+          builds: {
+            ...s.builds,
+            [buildId]: {
+              ...s.builds[buildId],
+              projectFiles: s.builds[buildId].projectFiles.map(f =>
+                f.path === path ? { ...f, content: truncated, contentLoaded: true } : f
+              )
+            }
+          }
+        }))
+        return truncated
+      } catch { return '' }
+    }
+    return file.content || ''
+  },
 
   setBuildIsRunning: (buildId, isRunning) => set(state => {
     const build = state.builds[buildId]
@@ -205,10 +300,15 @@ export const useAppStore = create<AppState>()(persist(
   addBuildTimelineItem: (buildId, item) => set(state => {
     const build = state.builds[buildId]
     if (!build) return state
+    const MAX_TIMELINE = 500
+    const timeline = build.timeline.length >= MAX_TIMELINE
+      ? [...build.timeline.slice(build.timeline.length - MAX_TIMELINE + 1), item]
+      : [...build.timeline, item]
+    scheduleBuildSave({ ...state.builds, [buildId]: { ...build, timeline } })
     return {
       builds: {
         ...state.builds,
-        [buildId]: { ...build, timeline: [...build.timeline, item] }
+        [buildId]: { ...build, timeline }
       }
     }
   }),
@@ -216,6 +316,7 @@ export const useAppStore = create<AppState>()(persist(
   updateBuildTimelineItem: (buildId, itemId, updates) => set(state => {
     const build = state.builds[buildId]
     if (!build) return state
+    scheduleBuildSave(get().builds)
     return {
       builds: {
         ...state.builds,
@@ -230,6 +331,7 @@ export const useAppStore = create<AppState>()(persist(
   removeBuildTimelineItem: (buildId, itemId) => set(state => {
     const build = state.builds[buildId]
     if (!build) return state
+    scheduleBuildSave(get().builds)
     return {
       builds: {
         ...state.builds,
@@ -244,6 +346,7 @@ export const useAppStore = create<AppState>()(persist(
   clearBuildTimeline: (buildId) => set(state => {
     const build = state.builds[buildId]
     if (!build) return state
+    scheduleBuildSave(get().builds)
     return { builds: { ...state.builds, [buildId]: { ...build, timeline: [] } } }
   }),
 
@@ -312,18 +415,22 @@ export const useAppStore = create<AppState>()(persist(
   })),
   setActiveBuild: (activeBuild) => set({ activeBuild }),
   selectElements: () => {},
+  setTerminalPermissions: (terminalPermissions) => set({ terminalPermissions }),
+  setUserPrompts: (userPrompts) => set({ userPrompts }),
+  addUserPrompt: (prompt) => set(state => ({ userPrompts: [...state.userPrompts, prompt] })),
+  removeUserPrompt: (index) => set(state => ({ userPrompts: state.userPrompts.filter((_, i) => i !== index) })),
+  addMcpServer: (server) => set(state => ({ mcpServers: [...state.mcpServers, server] })),
+  removeMcpServer: (index) => set(state => ({ mcpServers: state.mcpServers.filter((_, i) => i !== index) })),
+  setSystemPrompt: (systemPrompt) => set({ systemPrompt }),
 }),
 {
   name: 'build-agent-store',
   storage: persistStorage,
   partialize: (state) => ({
-    builds: state.builds,
-    activeBuild: state.activeBuild,
-    canvasElements: state.canvasElements,
-    connections: state.connections,
     apiSettings: state.apiSettings,
-    imports: state.imports,
-    splitViewEnabled: state.splitViewEnabled,
-    splitPaneBuildIds: state.splitPaneBuildIds,
+    terminalPermissions: state.terminalPermissions,
+    userPrompts: state.userPrompts,
+    mcpServers: state.mcpServers,
+    systemPrompt: state.systemPrompt,
   }),
 }))

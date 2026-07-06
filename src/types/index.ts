@@ -2,6 +2,8 @@ export interface BuildFile {
   id: string
   path: string
   content: string
+  /** Whether this file's content is loaded from disk (false = path-only listing) */
+  contentLoaded?: boolean
 }
 
 export interface BuildFileEvent {
@@ -114,6 +116,19 @@ export interface ApiSettings {
   availableModels?: string[]
 }
 
+export type CommandPermission = 'allow' | 'ask' | 'deny'
+
+export interface TerminalPermissionEntry {
+  command: string
+  permission: CommandPermission
+}
+
+export interface McpServer {
+  name: string
+  url: string
+  tools: string[]
+}
+
 export interface ImportEntry {
   name: string
   html: string
@@ -129,9 +144,6 @@ export interface ImportEntry {
         readDir: (path: string) => Promise<string[]>
         readDirRecursive: (path: string) => Promise<string[]>
         getBuildDirectory: () => Promise<string>
-        startServer: () => Promise<string>
-        stopServer: () => Promise<void>
-        isServerRunning: () => Promise<boolean>
         getNewComponentsPath: () => Promise<string>
         saveDesignerImage: (projectId: string, fileName: string, base64: string) => Promise<string>
         getDesignerProjectPath: (projectId: string) => Promise<string>
@@ -149,6 +161,20 @@ export interface ImportEntry {
         windowClose: () => void
         toggleFullScreen: () => void
         isFullScreen: () => Promise<boolean>
+        checkForUpdate: () => Promise<void>
+        downloadUpdate: () => Promise<void>
+        installUpdate: () => Promise<void>
+        onUpdateStatus: (callback: (status: UpdateStatus) => void) => void
       }
     }
+  }
+
+  export interface UpdateStatus {
+    status: 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error'
+    version?: string
+    releaseDate?: string
+    releaseNotes?: string
+    percent?: number
+    bytesPerSecond?: number
+    message?: string
   }

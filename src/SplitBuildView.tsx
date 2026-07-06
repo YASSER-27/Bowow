@@ -96,7 +96,7 @@ export default function SplitBuildView() {
               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {build?.workDir ? build.workDir.split(/[\\/]/).pop() : `Session ${idx + 1}`}
               </span>
-              {activeBuild === buildId && <span style={{ color: '#3b82f6', fontSize: 9 }}>●</span>}
+              {activeBuild === buildId && <span style={{ color: '#fff', fontSize: 9 }}>◿</span>}
             </div>
             <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
               <BuildAgent buildId={buildId} />
