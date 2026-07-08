@@ -1,0 +1,25 @@
+@font-face {
+  font-family: 'CustomArabic';
+  src: url('/font/AR.otf');
+}
+
+@font-face {
+  font-family: 'CustomEnglish';
+  src: url('/font/EN.otf');
+}
+
+:root {
+  --main-font: 'CustomEnglish', 'CustomArabic', 'Consolas', 'Courier New', monospace;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: #121212;
+  color: #e0e0e6;
+  font-family: var(--main-font);
+}
+
+* {
+  font-family: var(--main-font);
+}

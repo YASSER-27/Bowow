@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { BuildData, BuildTimelineItem, CanvasElement, Connection, ImportEntry, ApiSettings, ApiProvider, BuildFile, CommandPermission, McpServer, TerminalPermissionEntry } from '../types'
+import { defaultProviderManager, type ProviderConfig, type ProviderKind } from '../provider/provider'
 import { getUniqueId } from '../utils/uniqueId'
 
 export const PROVIDER_CONFIGS: Record<ApiProvider, { label: string; defaultUrl: string; defaultModel: string }> = {
@@ -23,6 +24,7 @@ const defaultApiSettings: ApiSettings = {
   connected: false,
   recentProjects: [],
   disableReasoning: false,
+  thinkingEffort: 'default',
   gameSystemPrompt: '',
   favoriteModels: [],
 }
@@ -53,6 +55,7 @@ interface AppState {
   builds: Record<number, BuildData>
   activeBuild: number | null
   canvasElements: CanvasElement[]
+  selectedElements: string[]
   connections: Connection[]
   apiSettings: ApiSettings
   imports: ImportEntry[]
@@ -120,28 +123,36 @@ const persistStorage = {
 // Global abort controllers keyed by buildId — not reactive, shared across remounts
 export const buildAbortControllers = new Map<number, AbortController>()
 
-// Debounced auto-save of build data to file (not localStorage)
+// Debounced auto-save of ALL build data to localStorage
 let saveTimer: any = null
 function scheduleBuildSave(builds: Record<number, BuildData>) {
   if (saveTimer) clearTimeout(saveTimer)
   saveTimer = setTimeout(() => {
     try {
-      // Only save the first build's timeline (minimal data: no large file contents)
-      const b = builds[0]
-      if (!b) return
-      const slim = {
-        id: b.id,
-        name: b.name,
-        timeline: b.timeline.map(t => ({
-          id: t.id, type: t.type, content: t.content?.length > 5000 ? t.content.slice(0, 5000) + '... [truncated]' : t.content,
-          title: t.title, path: t.path, toolName: t.toolName, status: t.status,
-          tokenCount: t.tokenCount, previewContent: t.previewContent?.length > 2000 ? t.previewContent.slice(0, 2000) + '...' : t.previewContent,
-          error: t.error, diffPreview: t.diffPreview, timestamp: t.timestamp,
-        })),
-        projectFiles: b.projectFiles.map(f => ({ path: f.path })),
-        workDir: b.workDir,
+      const slimBuilds: Record<number, any> = {}
+      for (const [id, b] of Object.entries(builds)) {
+        slimBuilds[Number(id)] = {
+          id: b.id,
+          name: b.name,
+          timeline: b.timeline.map(t => ({
+            id: t.id, type: t.type,
+            content: t.content?.length > 5000 ? t.content.slice(0, 5000) + '... [truncated]' : t.content,
+            title: t.title, path: t.path, toolName: t.toolName, status: t.status,
+            tokenCount: t.tokenCount,
+            previewContent: t.previewContent?.length > 2000 ? t.previewContent.slice(0, 2000) + '...' : t.previewContent,
+            error: t.error, diffPreview: t.diffPreview, timestamp: t.timestamp,
+          })),
+          projectFiles: b.projectFiles.map(f => ({ path: f.path })),
+          workDir: b.workDir,
+        }
       }
-      localStorage.setItem('build-agent-conv', JSON.stringify(slim))
+      localStorage.setItem('build-agent-conv-all', JSON.stringify(slimBuilds))
+      // Keep legacy save for build 0 for backward compat
+      const b0 = builds[0]
+      if (b0) {
+        const slim = slimBuilds[0]
+        localStorage.setItem('build-agent-conv', JSON.stringify(slim))
+      }
     } catch {}
   }, 2000)
 }
@@ -155,11 +166,20 @@ export function loadSavedConversation(buildId: number): Partial<BuildData> | nul
   } catch { return null }
 }
 
+export function loadAllSavedConversations(): Record<number, Partial<BuildData>> | null {
+  try {
+    const raw = localStorage.getItem('build-agent-conv-all')
+    if (!raw) return null
+    return JSON.parse(raw)
+  } catch { return null }
+}
+
 export const useAppStore = create<AppState>()(persist(
   (set, get) => ({
   builds: { 0: initialBuildData(0) },
   activeBuild: 0,
   canvasElements: [],
+  selectedElements: [],
   connections: [],
   apiSettings: loadSettings(),
   imports: [],
@@ -300,6 +320,8 @@ export const useAppStore = create<AppState>()(persist(
   addBuildTimelineItem: (buildId, item) => set(state => {
     const build = state.builds[buildId]
     if (!build) return state
+    // Guard against duplicate IDs
+    if (build.timeline.some(t => t.id === item.id)) return state
     const MAX_TIMELINE = 500
     const timeline = build.timeline.length >= MAX_TIMELINE
       ? [...build.timeline.slice(build.timeline.length - MAX_TIMELINE + 1), item]
@@ -361,6 +383,14 @@ export const useAppStore = create<AppState>()(persist(
   setApiProvider: (provider) => set(state => {
     const updated = { ...state.apiSettings, provider: provider as ApiProvider }
     saveSettings(updated)
+    defaultProviderManager.add({
+      kind: provider as ProviderKind,
+      label: provider,
+      apiKey: updated.apiKeys?.[provider] || '',
+      baseUrl: PROVIDER_CONFIGS[provider as ApiProvider]?.defaultUrl,
+      models: [],
+      defaultModel: PROVIDER_CONFIGS[provider as ApiProvider]?.defaultModel || '',
+    })
     return { apiSettings: updated }
   }),
   setApiBaseUrl: (baseUrl) => set(state => {
@@ -414,7 +444,7 @@ export const useAppStore = create<AppState>()(persist(
     builds: { ...state.builds, [buildId]: initialBuildData(buildId) }
   })),
   setActiveBuild: (activeBuild) => set({ activeBuild }),
-  selectElements: () => {},
+  selectElements: (ids) => set({ selectedElements: ids }),
   setTerminalPermissions: (terminalPermissions) => set({ terminalPermissions }),
   setUserPrompts: (userPrompts) => set({ userPrompts }),
   addUserPrompt: (prompt) => set(state => ({ userPrompts: [...state.userPrompts, prompt] })),

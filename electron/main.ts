@@ -216,8 +216,9 @@ ipcMain.handle('write-build-file', async (_event, { filePath, content, projectDi
 
 ipcMain.handle('run-command', async (_event, { command, cwd }) => {
   const executionCwd = cwd || path.join(app.getPath('userData'), 'build-beta')
+  const shell = process.env.COMSPEC || process.env.SHELL || (process.platform === 'win32' ? 'cmd.exe' : '/bin/sh')
   return new Promise((resolve) => {
-    exec(command, { cwd: executionCwd }, (error, stdout, stderr) => {
+    exec(command, { cwd: executionCwd, shell }, (error, stdout, stderr) => {
       resolve({
         stdout,
         stderr,
@@ -244,14 +245,19 @@ ipcMain.handle('scan-model', async (_event, { provider, model, localUrl, localKe
         url = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:generateContent?key=${localKey}`
         body = { contents: [{ parts: [{ text: 'Hi' }] }], generationConfig: { maxOutputTokens: 1 } }
       } else {
-        const baseUrl = provider === 'openai' ? 'https://api.openai.com/v1'
-          : provider === 'openrouter' ? 'https://openrouter.ai/api/v1'
-          : localUrl.replace(/\/+$/, '')
+        const isOpenAICompatible = provider === 'openai' || provider === 'openrouter'
+        const baseUrl = isOpenAICompatible
+          ? (provider === 'openai' ? 'https://api.openai.com/v1' : 'https://openrouter.ai/api/v1')
+          : provider === 'deepseek'
+            ? (localUrl || 'https://api.deepseek.com').replace(/\/+$/, '')
+            : localUrl.replace(/\/+$/, '')
         if (provider === 'ollama' && !localUrl.includes('/v1')) {
           url = `${localUrl.replace(/\/+$/, '')}/api/chat`
           body = { model, messages: [{ role: 'user', content: 'Hi' }], stream: false, options: { num_predict: 1 } }
         } else {
-          url = `${baseUrl}/chat/completions`
+          url = isOpenAICompatible
+            ? `${baseUrl}/chat/completions`
+            : `${baseUrl}/v1/chat/completions`
           if (localKey) headers['Authorization'] = `Bearer ${localKey}`
           body = { model, messages: [{ role: 'user', content: 'Hi' }], max_tokens: 1 }
         }

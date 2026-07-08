@@ -300,8 +300,20 @@ async function executeStreamingApiInner(
         geminiContents.unshift({ role: 'user', parts: [{ text: `[System context]:\n${systemMsg.content}` }] })
       }
     }
-    if (!isGemma && (model.model.includes('thinking') || model.model.includes('2.5'))) {
-      body.generationConfig.thinkingConfig = { thinkingBudget: 0, includeThoughts: false }
+    if (!isGemma) {
+      const effort = (globalThis as any).thinkingEffort || 'default';
+      if (effort === 'low') {
+        body.generationConfig.thinkingConfig = { thinkingBudget: 1024 };
+      } else if (effort === 'high') {
+        body.generationConfig.thinkingConfig = { thinkingBudget: 8192 };
+      } else if (effort === 'default') {
+        // default standard thinking config (some models require budget > 0 if they default to it)
+        if (model.model.includes('thinking')) {
+          body.generationConfig.thinkingConfig = { thinkingBudget: 2048 };
+        } else {
+          body.generationConfig.thinkingConfig = { thinkingBudget: 0 };
+        }
+      }
     }
 
   } else {

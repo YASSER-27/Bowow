@@ -99,7 +99,7 @@ export interface Connection {
   toId: string
 }
 
-export type ApiProvider = 'llama' | 'ollama' | 'gemini' | 'openai' | 'openrouter' | ''
+export type ApiProvider = 'llama' | 'ollama' | 'gemini' | 'openai' | 'openrouter' | 'deepseek' | ''
 
 export interface ApiSettings {
   provider: ApiProvider
@@ -113,7 +113,9 @@ export interface ApiSettings {
   recentProjects: string[]
   disableReasoning?: boolean
   favoriteModels?: string[]
-  availableModels?: string[]
+  disableReasoning?: boolean
+  thinkingEffort?: 'default' | 'low' | 'high'
+  favoriteModels?: string[]
 }
 
 export type CommandPermission = 'allow' | 'ask' | 'deny'

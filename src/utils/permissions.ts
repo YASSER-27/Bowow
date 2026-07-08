@@ -11,8 +11,11 @@ export function useCommandPermission() {
   const [alwaysApprove, setAlwaysApprove] = useState(false)
 
   const requestPermission = useCallback((command: string, cwd: string): Promise<boolean> => {
-    return Promise.resolve(true)
-  }, [])
+    if (alwaysApprove) return Promise.resolve(true)
+    return new Promise(resolve => {
+      setConfirmingCmd({ command, cwd, resolve })
+    })
+  }, [alwaysApprove])
 
   const clearPermission = useCallback(() => {
     setConfirmingCmd(null)

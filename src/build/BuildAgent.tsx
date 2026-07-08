@@ -1,13 +1,12 @@
 import { useState, useRef, useCallback, useEffect, useMemo, memo } from 'react'
+import ReactMarkdown from 'react-markdown'
 import JSZip from 'jszip'
-import { useAppStore, buildAbortControllers, loadSavedConversation } from '../store'
+import { useAppStore, buildAbortControllers, loadSavedConversation, loadAllSavedConversations } from '../store'
 import type { BuildFile, BuildFileEvent, BuildToolCall, BuildTimelineItem } from '../types'
 import { BuildError, BuildErrorReason } from '../types'
 import { SvgIcon, fileSvgName } from '../data/svg/icons'
 import { parse as incrementalParseJson } from 'partial-json'
-import { applyEditsToNormalizedContent, stripBom, detectLineEnding, normalizeToLF, restoreLineEndings } from '../utils/edit-diff'
-import { withFileMutationQueue } from '../utils/file-mutation-queue'
-import { diffLines, type Change } from 'diff'
+import { diffLines, diffArrays, type Change } from 'diff'
 import type { BuildMessage } from '../utils/buildEngine'
 import { validateContextBeforeApi, pruneLastMessages, executeStreamingApi, processChunkContent, looksLikeToolCallJson, extractToolCallsFromText } from '../utils/buildEngine'
 import { ColoredDiff } from './ColoredDiff'
@@ -33,303 +32,187 @@ import { execGitStatus, execGitDiff, execGitLog, execGitCommit } from '../utils/
 import SettingsModal from '../SettingsModal/SettingsModal'
 import yasserPic from '../assets/yasser.jpg'
 import animationGif from '../assets/animation.gif'
+import { executeTask } from '../tool/task'
+import { registerBuiltins, toolRegistry } from '../tool/builtins'
+import { assert, reply as permissionReply, listPending, type PermissionRequest } from '../permission/permission'
+import { applyConfig } from '../config/config'
+import { publishTimelineEvent, SessionEvents, subscribe, type EventPayload } from '../event/event'
+import { FileSystem } from '../filesystem/filesystem'
+import { FileMutation } from '../filesystem/file-mutation'
+import { init as formatInit, formatFile } from '../format/format'
+import { init as snapshotInit, track as snapshotTrack } from '../snapshot/snapshot'
+import { defaultMCPServerManager, MCPServerConfig } from '../mcp/mcp'
+import { startServer as lspStartServer, getServerForFile, stopAll as lspStopAll } from '../lsp/lsp'
+import { execCommand as ptyExec, create as ptyCreate } from '../pty/pty'
+import { defaultSkillManager } from '../skill/skill'
+import { defaultTodoManager } from '../session/todo'
+import { SessionManager } from '../session/index'
+import { ACPClient } from '../acp/acp'
+import { estimate as tokenEstimate } from '../util/token'
+import { streamLLM } from '../provider/llm-client'
+import { parse as patchParse, type Hunk } from '../patch/patch'
+import { grep as rgGrep, glob as rgGlob } from '../ripgrep/ripgrep'
 
 function isRTL(text: string): boolean {
   return /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/.test(text)
 }
 
+function processInline(text: string, parts: { type: string; content: string }[]): void {
+  // Split into lines to handle block-level elements
+  const lines = text.split('\n')
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (!trimmed) { parts.push({ type: 'text', content: '\n' }); continue }
+    
+    // Headers: ## or ###
+    const headerMatch = trimmed.match(/^(#{1,3})\s+(.+)/)
+    if (headerMatch) {
+      parts.push({ type: 'header', content: headerMatch[2] })
+      if (line !== trimmed) parts.push({ type: 'text', content: '\n' }) // preserve trailing newline
+      continue
+    }
+    
+    // Bullet lists: - or *
+    if (/^[-*]\s+/.test(trimmed)) {
+      parts.push({ type: 'bullet', content: trimmed.replace(/^[-*]\s+/, '') })
+      continue
+    }
+    
+    // Ordered lists: 1. 2. etc
+    const orderedMatch = trimmed.match(/^\d+\.\s+(.+)/)
+    if (orderedMatch) {
+      parts.push({ type: 'ordered', content: orderedMatch[1] })
+      continue
+    }
+    
+    // Inline formatting: **bold** and *italic*
+    let remaining = line
+    const inlineParts: { bold?: string; italic?: string; text: string }[] = []
+    const inlineRegex = /(\*\*(.+?)\*\*|\*(.+?)\*)/g
+    let m, last = 0
+    while ((m = inlineRegex.exec(remaining)) !== null) {
+      if (m.index > last) inlineParts.push({ text: remaining.slice(last, m.index) })
+      if (m[2]) inlineParts.push({ bold: m[2] })
+      else if (m[3]) inlineParts.push({ italic: m[3] })
+      last = m.index + m[0].length
+    }
+    if (last < remaining.length) inlineParts.push({ text: remaining.slice(last) })
+    
+    for (const ip of inlineParts) {
+      if (ip.bold) parts.push({ type: 'bold', content: ip.bold })
+      else if (ip.italic) parts.push({ type: 'italic', content: ip.italic })
+      else if (ip.text) parts.push({ type: 'text', content: ip.text })
+    }
+    parts.push({ type: 'text', content: '\n' })
+  }
+  // Remove trailing newline if added
+  if (parts.length > 0 && parts[parts.length - 1].content === '\n') parts.pop()
+}
+
 const MarkdownContent = memo(({ content, color }: { content: string; color: string }) => {
   const cleaned = content.replace(/<\/?plan>/gi, '').trim()
   if (!cleaned) return null
-  const parts: { type: 'text' | 'code' | 'bold' | 'italic'; content: string; lang?: string }[] = []
-  const codeRegex = /```(\w*)\n([\s\S]*?)```/g
-  let lastIndex = 0, match
-  while ((match = codeRegex.exec(cleaned)) !== null) {
-    if (match.index > lastIndex) parts.push({ type: 'text', content: cleaned.slice(lastIndex, match.index) })
-    parts.push({ type: 'code', content: match[2], lang: match[1] || undefined })
-    lastIndex = match.index + match[0].length
-  }
-  if (lastIndex < cleaned.length) parts.push({ type: 'text', content: cleaned.slice(lastIndex) })
+
   return (
-    <div style={{ color, lineHeight: 1.6, fontSize: 'var(--font-md)', whiteSpace: 'pre-wrap' }}>
-      {parts.map((part, i) =>
-        part.type === 'code' ? (
-          <pre key={i} style={{ background: '#111', color: '#e0e0e6', borderRadius: 6, padding: 12, margin: '8px 0', fontSize: 'var(--font-md)', overflow: 'auto', lineHeight: 1.4 }}>
-            <code>{part.content}</code>
-          </pre>
-        ) : (
-          <span key={i} style={{ whiteSpace: 'pre-wrap' }}>{part.content}</span>
-        )
-      )}
+    <div style={{ color: '#ccc', lineHeight: 1.7, fontSize: '13.5px', wordBreak: 'break-word', overflowWrap: 'anywhere', fontFamily: 'system-ui, -apple-system, sans-serif' }}>
+      <ReactMarkdown
+        components={{
+          p: ({ node, ...props }) => <div style={{ margin: '8px 0' }} {...props} />,
+          h1: ({ node, ...props }) => <div style={{ fontWeight: 700, fontSize: '1.2rem', margin: '16px 0 6px', color: '#ddd', borderBottom: '1px solid #333', paddingBottom: '4px' }} {...props} />,
+          h3: ({ node, ...props }) => <div style={{ fontWeight: 600, fontSize: '1rem', margin: '12px 0 4px', color: '#bbb' }} {...props} />,
+          ul: ({ node, ...props }) => <ul style={{ paddingLeft: 20, margin: '6px 0', listStyleType: 'disc', gap: '4px', display: 'flex', flexDirection: 'column' }} {...props} />,
+          ol: ({ node, ...props }) => <ol style={{ paddingLeft: 20, margin: '6px 0', listStyleType: 'decimal', gap: '4px', display: 'flex', flexDirection: 'column' }} {...props} />,
+          li: ({ node, ...props }) => <li style={{ margin: '1px 0', color: '#bbb' }} {...props} />,
+          code: ({ node, inline, ...props }) => {
+            if (inline) {
+              return <code style={{ background: '#222', color: '#bbb', borderRadius: 4, padding: '2px 6px', fontSize: '12px', fontFamily: 'Consolas, Menlo, monospace', border: '1px solid #333' }} {...props} />
+            }
+            return (
+              <pre style={{ background: '#1a1a1a', color: '#ccc', borderRadius: 6, padding: 14, margin: '10px 0', fontSize: '12.5px', overflow: 'auto', lineHeight: 1.5, fontFamily: 'Consolas, Menlo, monospace', border: '1px solid #2e2e2e' }}>
+                <code {...props} />
+              </pre>
+            )
+          },
+          blockquote: ({ node, ...props }) => <blockquote style={{ borderLeft: '3px solid #444', margin: '8px 0', paddingLeft: 12, color: '#888', fontStyle: 'italic' }} {...props} />,
+          strong: ({ node, ...props }) => <strong style={{ fontWeight: 700, color: '#ddd' }} {...props} />,
+          em: ({ node, ...props }) => <em style={{ fontStyle: 'italic', color: '#aaa' }} {...props} />,
+          a: ({ node, ...props }) => <a style={{ color: '#888', textDecoration: 'underline' }} {...props} />,
+          hr: ({ node, ...props }) => <hr style={{ border: 'none', borderTop: '1px solid #333', margin: '12px 0' }} {...props} />,
+        }}
+      >
+        {cleaned}
+      </ReactMarkdown>
     </div>
   )
-}
-)
+})
 
-const TOOL_DEFS = [
-  {
-    type: 'function',
-    function: {
-      name: 'create_file',
-      description: 'Create a file with full content. WARNING: if the file already exists, this OVERWRITES it completely — it does not fail. Only use this on an existing path after you have read_file\'d it and a full rewrite is truly needed; otherwise use edit_file for a targeted change.',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'File path, e.g. src/game.py' },
-          content: { type: 'string', description: 'Full file content' },
-        },
-        required: ['path', 'content'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'read_file',
-      description: 'Read the content of an existing file. ALWAYS use this before editing a file you have not just created yourself in this conversation. You can optionally specify start_line and end_line to read specific sections of large files.',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string' },
-          start_line: { type: 'number', description: 'Optional line number to start reading from (1-indexed)' },
-          end_line: { type: 'number', description: 'Optional line number to end reading at (1-indexed, inclusive)' },
-        },
-        required: ['path'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'edit_file',
-      description: 'Replace specific text in an existing file (str_replace). ' +
-        'Each old_str MUST be unique in the file — include enough surrounding lines to guarantee uniqueness. ' +
-        'The match is exact: whitespace, indentation, newlines must match precisely. ' +
-        'When replace_all is true, all occurrences of old_str will be replaced.',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string' },
-          old_str: { type: 'string', description: 'Text to replace — must be exact including all whitespace' },
-          new_str: { type: 'string', description: 'Replacement text (must differ from old_str)' },
-          replace_all: { type: 'boolean', description: 'Replace all occurrences of old_str (default false)' },
-        },
-        required: ['path', 'old_str', 'new_str'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'ls',
-      description: 'List files and directories inside a project directory path.',
-      parameters: {
-        type: 'object',
-        properties: {
-          path: { type: 'string', description: 'Directory path, e.g. src/' },
-        },
-        required: ['path'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'glob_search',
-      description: 'Search for files by filename pattern (glob syntax).',
-      parameters: {
-        type: 'object',
-        properties: {
-          pattern: { type: 'string', description: 'Glob pattern, e.g. src/**/*.py' },
-        },
-        required: ['pattern'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'grep_search',
-      description: 'Search file contents by regex pattern. Returns matching lines with line numbers.',
-      parameters: {
-        type: 'object',
-        properties: {
-          pattern: { type: 'string', description: 'Regex pattern to search for in file contents' },
-        },
-        required: ['pattern'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'semantic_search',
-      description: 'Search for relevant files based on semantic meaning and project dependencies. Use this when you are unsure which files are related to a feature or bug.',
-      parameters: {
-        type: 'object',
-        properties: {
-          query: { type: 'string', description: 'The search query, e.g. "auth logic" or "navigation component"' },
-        },
-        required: ['query'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'create_zip',
-      description: 'Compress all current project files into a .zip archive for download.',
-      parameters: {
-        type: 'object',
-        properties: {
-          fileName: { type: 'string', description: 'Name of the zip file, e.g. project.zip' },
-        },
-        required: ['fileName'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'generate_project_map',
-      description: 'Scan the project files and generate a project_map.json file that maps dependencies and file relationships. Call this when you need to understand project structure.',
-      parameters: {
-        type: 'object',
-        properties: {},
-        required: [],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'run_command',
-      description: 'Run a shell command in the project directory.',
-      parameters: {
-        type: 'object',
-        properties: {
-          command: { type: 'string', description: 'Command to execute' },
-          cwd: { type: 'string', description: 'Working directory' },
-        },
-        required: ['command'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'git_status',
-      description: 'Show git status — modified, untracked, staged files. Run this before git_diff or git_commit.',
-      parameters: {
-        type: 'object',
-        properties: {},
-        required: [],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'git_diff',
-      description: 'Show git diff — uncommitted changes. Use this to review changes before committing.',
-      parameters: {
-        type: 'object',
-        properties: {},
-        required: [],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'git_log',
-      description: 'Show recent git commit history (last 10).',
-      parameters: { type: 'object', properties: {}, required: [] },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'generate_image',
-      description: 'Generate an image based on a prompt.',
-      parameters: {
-        type: 'object',
-        properties: { prompt: { type: 'string' } },
-        required: ['prompt'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'edit_image',
-      description: 'Edit an existing image based on a prompt.',
-      parameters: {
-        type: 'object',
-        properties: { prompt: { type: 'string' }, imageBase64: { type: 'string' } },
-        required: ['prompt'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'git_commit',
-      description: 'Stage all changes (git add -A) and commit with a given message.',
-      parameters: {
-        type: 'object',
-        properties: {
-          message: { type: 'string', description: 'Commit message describing the changes' },
-        },
-        required: ['message'],
-      },
-    },
-  },
-]
+// Register built-in tools at module level
+registerBuiltins()
+
+// Tool definitions — generated from registry with fallback for tools not yet registered
+function getToolDefs() {
+  const registryDefs = toolRegistry.toToolDefs()
+  const registryNames = new Set(registryDefs.map(d => d.function.name))
+  const fallback: Record<string, any> = {
+    ls: { type: 'function', function: { name: 'ls', description: 'List files and directories inside a project directory path.', parameters: { type: 'object', properties: { path: { type: 'string', description: 'Directory path, e.g. src/' } }, required: ['path'] } } },
+    semantic_search: { type: 'function', function: { name: 'semantic_search', description: 'Search for relevant files based on semantic meaning and project dependencies.', parameters: { type: 'object', properties: { query: { type: 'string', description: 'The search query, e.g. "auth logic" or "navigation component"' } }, required: ['query'] } } },
+    create_zip: { type: 'function', function: { name: 'create_zip', description: 'Compress all current project files into a .zip archive for download.', parameters: { type: 'object', properties: { fileName: { type: 'string', description: 'Name of the zip file, e.g. project.zip' } }, required: ['fileName'] } } },
+    generate_project_map: { type: 'function', function: { name: 'generate_project_map', description: 'Scan the project files and generate a project_map.json file.', parameters: { type: 'object', properties: {}, required: [] } } },
+    git_status: { type: 'function', function: { name: 'git_status', description: 'Show git status — modified, untracked, staged files.', parameters: { type: 'object', properties: {}, required: [] } } },
+    git_diff: { type: 'function', function: { name: 'git_diff', description: 'Show git diff — uncommitted changes.', parameters: { type: 'object', properties: {}, required: [] } } },
+    git_log: { type: 'function', function: { name: 'git_log', description: 'Show recent git commit history (last 10).', parameters: { type: 'object', properties: {}, required: [] } } },
+    git_commit: { type: 'function', function: { name: 'git_commit', description: 'Stage all changes and commit with a given message.', parameters: { type: 'object', properties: { message: { type: 'string', description: 'Commit message' } }, required: ['message'] } } },
+    generate_image: { type: 'function', function: { name: 'generate_image', description: 'Generate an image based on a prompt.', parameters: { type: 'object', properties: { prompt: { type: 'string' } }, required: ['prompt'] } } },
+    edit_image: { type: 'function', function: { name: 'edit_image', description: 'Edit an existing image based on a prompt.', parameters: { type: 'object', properties: { prompt: { type: 'string' }, imageBase64: { type: 'string' } }, required: ['prompt'] } } },
+    mcp_list_servers: { type: 'function', function: { name: 'mcp_list_servers', description: 'List all connected MCP servers.', parameters: { type: 'object', properties: {}, required: [] } } },
+    mcp_add_server: { type: 'function', function: { name: 'mcp_add_server', description: 'Add and connect a new MCP server.', parameters: { type: 'object', properties: { name: { type: 'string' }, command: { type: 'string' }, args: { type: 'string' }, url: { type: 'string' } }, required: ['name'] } } },
+    mcp_remove_server: { type: 'function', function: { name: 'mcp_remove_server', description: 'Disconnect and remove an MCP server.', parameters: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] } } },
+    mcp_list_server_tools: { type: 'function', function: { name: 'mcp_list_server_tools', description: 'List tools on a specific MCP server.', parameters: { type: 'object', properties: { server: { type: 'string' } }, required: [] } } },
+    mcp_call_tool: { type: 'function', function: { name: 'mcp_call_tool', description: 'Call a tool on an MCP server.', parameters: { type: 'object', properties: { server: { type: 'string' }, tool: { type: 'string' }, args: { type: 'object' } }, required: ['server', 'tool'] } } },
+    mcp_list_resources: { type: 'function', function: { name: 'mcp_list_resources', description: 'List resources on an MCP server.', parameters: { type: 'object', properties: { server: { type: 'string' } }, required: [] } } },
+    lsp_go_to_definition: { type: 'function', function: { name: 'lsp_go_to_definition', description: 'Go to the definition of a symbol at a specific file location.', parameters: { type: 'object', properties: { path: { type: 'string' }, line: { type: 'number' }, character: { type: 'number' } }, required: ['path', 'line', 'character'] } } },
+    lsp_find_references: { type: 'function', function: { name: 'lsp_find_references', description: 'Find all references to a symbol at a specific file location.', parameters: { type: 'object', properties: { path: { type: 'string' }, line: { type: 'number' }, character: { type: 'number' } }, required: ['path', 'line', 'character'] } } },
+    lsp_hover: { type: 'function', function: { name: 'lsp_hover', description: 'Get hover information for a symbol at a specific file location.', parameters: { type: 'object', properties: { path: { type: 'string' }, line: { type: 'number' }, character: { type: 'number' } }, required: ['path', 'line', 'character'] } } },
+    lsp_document_symbols: { type: 'function', function: { name: 'lsp_document_symbols', description: 'List all symbols in a file.', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } } },
+    pty_exec: { type: 'function', function: { name: 'pty_exec', description: 'Execute a command in a pseudo-terminal.', parameters: { type: 'object', properties: { command: { type: 'string' }, cwd: { type: 'string' }, timeout: { type: 'number' } }, required: ['command'] } } },
+    list_skills: { type: 'function', function: { name: 'list_skills', description: 'List available skill guides discovered in the project.', parameters: { type: 'object', properties: {}, required: [] } } },
+    todo_add: { type: 'function', function: { name: 'todo_add', description: 'Add a todo item to the current task list.', parameters: { type: 'object', properties: { content: { type: 'string' }, priority: { type: 'string', enum: ['high', 'medium', 'low'] } }, required: ['content'] } } },
+    todo_list: { type: 'function', function: { name: 'todo_list', description: 'List all todo items for the current session.', parameters: { type: 'object', properties: {}, required: [] } } },
+    todo_mark_done: { type: 'function', function: { name: 'todo_mark_done', description: 'Mark a todo item as done.', parameters: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] } } },
+    acp_connect: { type: 'function', function: { name: 'acp_connect', description: 'Connect to a remote agent via ACP.', parameters: { type: 'object', properties: { url: { type: 'string' }, token: { type: 'string' } }, required: ['url'] } } },
+    acp_prompt: { type: 'function', function: { name: 'acp_prompt', description: 'Send a prompt to a connected ACP agent session.', parameters: { type: 'object', properties: { session_id: { type: 'string' }, message: { type: 'string' }, model: { type: 'string' } }, required: ['message'] } } },
+    patch_apply: { type: 'function', function: { name: 'patch_apply', description: 'Apply a structured patch using Begin Patch / End Patch format.', parameters: { type: 'object', properties: { patch: { type: 'string' } }, required: ['patch'] } } },
+  }
+  const fallbackDefs = Object.values(fallback).filter(d => !registryNames.has(d.function.name))
+  return [...registryDefs, ...fallbackDefs]
+}
+const TOOL_DEFS = getToolDefs()
 
 function buildSystemPrompt(provider: string, customPrompt?: string): string {
-  const base = `You are a file-building agent that communicates ONLY through tool calls. Your job is to create, read, edit, and verify files using the available tool calls.
+  const base = `You are a coding agent. Your job is to use tools to complete tasks. You have 30+ tools available.
 
-CRITICAL RULE — ABSOLUTELY NO TEXT OUTPUT BETWEEN TOOL CALLS:
-- You MUST NOT output any plan, reasoning, summary, explanation, or code as text outside of tool calls.
-- You MUST NOT use <plan>, [BUILD], [RESEARCH], or any other planning markers in your text output.
-- You MUST NOT show code blocks, file content, diffs, or anything else inline.
-- After receiving a tool result, silently decide your next tool call and output ONLY the next tool call.
-- When ALL work is complete, output a MAXIMUM 1-line summary (e.g. "Done: created src/index.html with basic structure").
-- If the user asks a question you can answer without tools, respond with at most 1-2 lines.
+CRITICAL RULES:
+1. STRICT CHATTER SILENCE: NEVER explain what you are about to do. Do NOT write plans, explanations, apologies, intro phrases, or transitional text.
+2. If you need to read a file, call read_file. If you need to edit, call edit_file. Do NOT say "I will now read..." or "May I proceed with this change?". Just output the tool call.
+3. NEVER repeat claims or send generic update messages. Once a task is done, write exactly 1 concise sentence summarizing what changed.
+4. For greetings or questions: answer in exactly one short sentence. No boilerplate.
+5. DO NOT narrate. Output only tool calls. Minimize all text to absolute zero if possible.
 
-KNOWLEDGE GRAPH:
-- For complex tasks, use 'generate_project_map' to create/update 'project_map.json'.
-- Refer to 'project_map.json' to understand dependencies before editing files.
-- Use Windows-compatible shell commands (e.g., 'dir' instead of 'ls', 'type' instead of 'cat').
-- Use 'python' to run scripts, 'node' for JavaScript files.
-- File paths use forward slashes (/) but the OS accepts backslashes too.
+WORKFLOW RULES:
+- For tasks that require 3+ files or complex changes: Before starting, output a SHORT numbered plan (max 5 items), then immediately begin executing.
+- For simple single-file changes: skip the plan, just do it.
+- After modifying Python (.py) files: always run: python -m py_compile <filename> to verify syntax.
+- After modifying JS/TS files: if node is available, run: node --check <filename>
+- After modifying HTML files: verify opening/closing tag integrity.
+- After ALL work: write 1 concise sentence summary (what was done, nothing else).
 
-CORE WORKFLOW:
-1. Read existing files first before editing them — never assume what a file contains.
-2. Write or edit code using create_file (for new files) or edit_file (for existing files).
-3. Run the code using run_command to verify it works.
-4. If there are errors, analyze the output and use edit_file to fix bugs.
-5. Repeat until the code runs perfectly.
+TOOL USAGE RULES:
+- Always read a file (or part of it) using read_file before editing it.
+- Files might be very large. The read_file tool supports start_line and end_line. Only read the relevant segment or first 100 lines at a time.
+- Before modifying or overwriting any file, you must obtain permission first. Keep the permission request to exactly 1 short sentence stating what you will edit.
+- Avoid commands that destroy or delete project files unless explicitly asked. Check files first.
 
-STRICT RULES:
-1. BE DIRECT — Only call tools. Never narrate your plan or reasoning in text output. Write a max 1-line summary only when ALL work is complete.
-2. NO BLOAT — Do not create unnecessary helper files. Create only what is needed.
-3. NO INFINITE LOOPS — If a command fails 3+ times with the same error, stop and explain the issue clearly instead of repeating the same approach.
-4. PRESERVE — Do not delete or rewrite existing functionality the user did not ask to change.
-5. READ BEFORE EDIT — Always read_file before edit_file. Never blindly recreate a file with create_file — it OVERWRITES without warning.
-6. VERIFY — After creating or editing any .py, .js, or .html file, run at minimum a syntax check (e.g., python -m py_compile, node --check).
-7. PACKAGE — If the user asks for the full project, a ZIP file, or to "send all files", use the create_zip tool to package the current project state.
-8. OBEY — When the user says "run X.py" or "شغل X.py", do ONLY run_command — do NOT edit or create any files unless they fail to run. Listen precisely to what the user asks.
-
-EDIT_FILE BEST PRACTICES:
-- Each old_str must be unique in the file — include enough surrounding lines to guarantee uniqueness.
-- Keep the old_str as small as possible while still being unique.
-- The replacement is exact — whitespace, indentation, and newlines must match precisely.
-
-PROJECT STRUCTURE:
-- All files are stored under the project root directory.
-- For HTML projects, put all CSS inline in <style> tags and all JS inline in <script> tags inside a single .html file unless the user explicitly asks for separate files.`
+For Windows: Use 'dir', 'type', 'python', 'node'. Paths use forward slashes (/).`
 
   const customNote = customPrompt ? `\n\nUSER INSTRUCTIONS:\n${customPrompt}` : ''
 
@@ -337,7 +220,20 @@ PROJECT STRUCTURE:
     ? `\n\nOUTPUT FORMAT (one tool call per response):\n{"name":"create_file","args":{"path":"src/index.html","content":"<h1>Hello</h1>"}}`
     : ''
 
-  return base + customNote + jsonFallbackNote
+  const taskNote = `\n\nSUB-AGENTS (task tool):
+You have a 'task' tool to delegate work to sub-agents. Use it for:
+- Complex multi-step research that can run in parallel
+- Exploring large codebases when you need focused analysis
+- Tasks that require specialized handling (e.g., security audit, dependency analysis)
+
+Available sub-agent types:
+- explore: Fast codebase exploration (search, read files, answer code questions)
+- general: Multi-step research and complex tasks
+
+Usage: task description="3-5 word summary" prompt="Detailed task instructions" subagent_type="explore"
+For parallel work, call task multiple times in the same response (max 3 concurrent).`
+
+  return base + customNote + jsonFallbackNote + taskNote
 }
 
 // Available tools:
@@ -354,6 +250,7 @@ PROJECT STRUCTURE:
 // - For HTML projects, prefer putting CSS in <style> tags and JS in <script> tags inside the .html file rather than creating separate .css/.js files
 // - For edit_file, use the smallest possible old_str/new_str
 // - First read_file then edit_file — never edit without reading
+// - Before modifying an existing file (create_file with existing path or edit_file), FIRST ask the user for permission by stating what you want to change and why, then wait for approval before proceeding
 // - After ALL tool calls, write a 2-line summary
 
 // ── Helpers ──
@@ -378,30 +275,14 @@ function computeDiffStats(oldContent: string, newContent: string): { added: numb
 
 const ALLOWED_EXTS = ['.html', '.css', '.js', '.ts', '.tsx', '.jsx', '.vue', '.svelte', '.json', '.py', '.md', '.yaml', '.yml', '.env', '.txt', '.xml', '.svg', '.sh', '.bat', '.ps1', '.toml', '.ini', '.cfg', '.conf', '.sql', '.rb', '.go', '.rs', '.java', '.kt', '.swift', '.php', '.dockerfile', '.makefile', ''];
 
-// Files without extension that should be allowed
-const ALLOWED_NO_EXT = ['dockerfile', 'makefile', 'procfile', '.gitignore', '.env.example', '.editorconfig', '.prettierrc', '.eslintrc'];
-
-function validatePath(path: string): string | null {
-  if (path.includes('..') || path.startsWith('/')) {
-    return 'Unsafe path';
-  }
-  const name = basename(path).toLowerCase();
-  if (ALLOWED_NO_EXT.includes(name)) return null;
-  const dotIndex = path.lastIndexOf('.');
-  if (dotIndex === -1) {
-    return null; // allow files without extension (e.g. Makefile, Dockerfile)
-  }
-  const ext = path.slice(dotIndex).toLowerCase();
-  if (!ALLOWED_EXTS.includes(ext)) {
-    return null; // allow unknown extensions instead of blocking
-  }
-  return null;
-}
+// ── Helpers ──
 
 function wrapContent(content: string, ext: string, path: string): string {
   return `<!DOCTYPE html><html><head><style>
-body{margin:0;background:#121212;color:#e0e0e6;font-family:'Consolas','Courier New',monospace;font-size:12px;padding:12px;white-space:pre-wrap;word-break:break-word;overflow:auto;height:100vh;box-sizing:border-box;}
-.fn{position:sticky;top:0;background:#121212;padding:4px 0 8px;font-size:10px;color:#00adb5;border-bottom:1px solid #2a2a32;margin-bottom:8px;}
+body{margin:0;background:#121212;color:#e0e0e6;font-family:'CustomEnglish', 'CustomArabic', 'Consolas', 'Courier New', monospace;font-size:12px;padding:12px;white-space:pre-wrap;word-break:break-word;overflow:auto;height:100vh;box-sizing:border-box;}
+.fn{position:sticky;top:0;background:#121212;padding:4px 0 8px;font-size:10px;color:#666;border-bottom:1px solid #2e2e2e;margin-bottom:8px;}
+@font-face { font-family: 'CustomArabic'; src: url('/font/AR.otf'); }
+@font-face { font-family: 'CustomEnglish'; src: url('/font/EN.otf'); }
 </style></head><body><div class="fn">${path}</div><code>${content.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</code></body></html>`
 }
 
@@ -523,8 +404,14 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
   const updateCanvasElement = useAppStore(s => s.updateCanvasElement)
   const addConnection = useAppStore(s => s.addConnection)
   const setBuildEditingPaths = useAppStore(s => s.setBuildEditingPaths)
-  const apiSettings = useAppStore(s => s.apiSettings)
-  const setApiModel = useAppStore(s => s.setApiModel)
+  const globalApiSettings = useAppStore(s => s.apiSettings)
+  const [localModel, setLocalModel] = useState<string | undefined>(undefined)
+  const [localEffort, setLocalEffort] = useState<string | undefined>(undefined)
+  const apiSettings = useMemo(() => ({
+    ...globalApiSettings,
+    model: localModel ?? globalApiSettings.model,
+    thinkingEffort: localEffort ?? globalApiSettings.thinkingEffort,
+  }), [globalApiSettings, localModel, localEffort])
   const buildWorkDir = useAppStore(s => s.builds[buildId]?.workDir ?? null)
   const setBuildWorkDir = useAppStore(s => s.setBuildWorkDir)
   const userPrompts = useAppStore(s => s.userPrompts)
@@ -541,17 +428,26 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
     return map
   }, [timeline])
   const userTimeline = useMemo(() => timeline.filter(i => i.type === 'user'), [timeline])
-  const addTimelineItem = useAppStore(s => s.addBuildTimelineItem)
-  const updateTimelineItem = useAppStore(s => s.updateBuildTimelineItem)
-  const removeTimelineItem = useAppStore(s => s.removeBuildTimelineItem)
+  const addTimelineItem = useCallback((id: number, item: BuildTimelineItem) => {
+    useAppStore.getState().addBuildTimelineItem(id, item)
+    publishTimelineEvent(id, SessionEvents.MessageAdded, { type: item.type, id: item.id, path: item.path })
+  }, [])
+  const updateTimelineItem = useCallback((id: number, itemId: string, updates: Partial<BuildTimelineItem>) => {
+    useAppStore.getState().updateBuildTimelineItem(id, itemId, updates)
+  }, [])
+  const removeTimelineItem = useCallback((id: number, itemId: string) => {
+    useAppStore.getState().removeBuildTimelineItem(id, itemId)
+  }, [])
   const clearTimeline = useAppStore(s => s.clearBuildTimeline)
   const saveImport = useAppStore(s => s.saveImport)
+  const updateApiSettings = useAppStore(s => s.updateApiSettings)
 
   const [input, setInput] = useState('')
   const [isRunning, setIsRunning] = useState(false)
   const [isAutoRetrying, setIsAutoRetrying] = useState(false)
   const [isShellRunning, setIsShellRunning] = useState(false)
   const [runningCommand, setRunningCommand] = useState('')
+  const [currentAction, setCurrentAction] = useState<string>('')
   const [userScrolledUp, setUserScrolledUp] = useState(false)
   const [tokenCount, setTokenCount] = useState(0)
   const [retryConversation, setRetryConversation] = useState<{ role: string; content: string }[] | null>(null)
@@ -568,7 +464,7 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
   const [showInfo, setShowInfo] = useState(false)
   const [fullImage, setFullImage] = useState<string | null>(null)
   const [showModelPicker, setShowModelPicker] = useState(false)
-  const [collapsedItems, setCollapsedItems] = useState<Set<string>>(new Set())
+  const [expandedItems, setCollapsedItems] = useState<Set<string>>(new Set())
   const toggleCollapse = (id: string) => {
     setCollapsedItems(prev => {
       const next = new Set(prev)
@@ -602,6 +498,26 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
   // idx (from the streaming delta) -> timeline file id, reset once per model step
   const previewFileIds = useRef<Map<number, string>>(new Map())
   const { checkpointStack, saveCheckpoint, undoLastCheckpoint } = useCheckpoint()
+
+  // ── Register built-in tools on mount (once) ──
+  const toolsRegistered = useRef(false)
+  if (!toolsRegistered.current) {
+    toolsRegistered.current = true
+  }
+
+  // ── Permission request state ──
+  const [pendingPermission, setPendingPermission] = useState<PermissionRequest | null>(null)
+  const pendingPermRef = useRef<PermissionRequest | null>(null)
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as PermissionRequest
+      if (detail.sessionID !== String(buildId)) return
+      pendingPermRef.current = detail
+      setPendingPermission(detail)
+    }
+    window.addEventListener('permission-request', handler)
+    return () => window.removeEventListener('permission-request', handler)
+  }, [buildId])
 
   const calcTokens = (content: string) => countTokens(content)
 
@@ -665,6 +581,296 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
     tc.arguments = tc.arguments || {}
     const path = tc.arguments.path || ''
 
+    // ── Schema validation: ensure required arguments are present ──
+    const toolDef = TOOL_DEFS.find(d => d.function.name === tc.name)
+    if (toolDef) {
+      const required = toolDef.function.parameters.required || []
+      for (const key of required) {
+        if (tc.arguments[key] === undefined || tc.arguments[key] === null || tc.arguments[key] === '') {
+          return { action: 'read', path: '/', stats: { added: 0, removed: 0 }, status: 'error', error: `Missing required argument: ${key}` }
+        }
+      }
+    }
+
+    // ── Try tool registry for registered tools first ──
+    {
+      const store = useAppStore.getState()
+      if (tc.name === 'run_command') {
+        const cmd = tc.arguments.command || ''
+        setIsShellRunning(true)
+        setRunningCommand(cmd)
+      }
+      const materialization = toolRegistry.materialize()
+      const knownTool = materialization.definitions.find(d => d.name === tc.name)
+      if (knownTool) {
+        const actionLabel = tc.name === 'create_file' ? 'Creating file: ' + path : tc.name === 'edit_file' ? 'Editing file: ' + path : tc.name === 'read_file' ? 'Reading file: ' + path : tc.name === 'run_command' ? 'Running command: ' + (tc.arguments.command || '') : 'Executing ' + tc.name;
+        setCurrentAction(actionLabel)
+        if (tc.name === 'create_file' || tc.name === 'edit_file') {
+          const existingFile = useAppStore.getState().builds[buildId]?.projectFiles.find(f => f.path === path)
+          if (existingFile) {
+            let oldContent = existingFile.content || ''
+            if (!existingFile.contentLoaded) oldContent = await useAppStore.getState().loadBuildFileContent(buildId, path)
+            saveCheckpoint(buildId, path, oldContent)
+            const _store = useAppStore.getState()
+            const wd = _store.builds[buildId]?.workDir
+            if (wd) { try { snapshotInit(wd); snapshotTrack(wd) } catch {} }
+          }
+        }
+        const result = await materialization.settle({
+          sessionID: String(buildId),
+          agent: 'default',
+          assistantMessageID: 'msg_' + (tc.id || Date.now()),
+          call: { id: tc.id || String(Date.now()), name: tc.name, input: tc.arguments },
+          context: { buildId, apiSettings: store.apiSettings },
+        })
+        setCurrentAction('')
+        setIsShellRunning(false)
+          if (result.result.type === 'success' && (tc.arguments.command || '').includes('error')) {
+            const autoFixMsg = `The command '${tc.arguments.command}' failed. Please analyze the files involved and fix the issue immediately.`
+            conversationRef.current.push({ role: 'user', content: autoFixMsg })
+          }
+        if (result.result.type === 'success') {
+          const action =
+            tc.name === 'create_file' ? 'create' :
+            tc.name === 'edit_file' ? 'edit' :
+            tc.name === 'run_command' ? 'run' :
+            tc.name === 'read_file' ? 'read' : 'read'
+          const stats = tc.name === 'create_file' ? { added: (tc.arguments.content || '').split('\n').filter(Boolean).length, removed: 0 } :
+                        tc.name === 'edit_file' ? { added: (tc.arguments.new_str || '').split('\n').length, removed: (tc.arguments.old_str || '').split('\n').length } :
+                        { added: 0, removed: 0 }
+          return {
+            action, path: path || '/', stats,
+            status: 'success',
+            content: typeof result.result.value === 'string' ? result.result.value : JSON.stringify(result.result.value),
+          }
+        }
+        return {
+          action: 'read', path: path || '/', stats: { added: 0, removed: 0 },
+          status: 'error', error: String(result.result.value),
+        }
+      }
+      if (tc.name === 'run_command') {
+        setIsShellRunning(false)
+        setRunningCommand('')
+      }
+    }
+
+    // ── mcp: Model Context Protocol ──
+    if (tc.name.startsWith('mcp_')) {
+      const mcp = defaultMCPServerManager
+      if (tc.name === 'mcp_list_servers') {
+        const servers = mcp.list()
+        return {
+          action: 'read', path: '/', stats: { added: 0, removed: 0 },
+          status: 'success',
+          content: servers.length === 0 ? 'No MCP servers connected.' : servers.map(s => `- ${s.name}`).join('\n'),
+        }
+      }
+      if (tc.name === 'mcp_add_server') {
+        const config: MCPServerConfig = { name: tc.arguments.name }
+        if (tc.arguments.command) { config.command = tc.arguments.command; config.args = (tc.arguments.args || '').split(/\s+/).filter(Boolean) }
+        if (tc.arguments.url) config.url = tc.arguments.url
+        const client = mcp.add(config)
+        try {
+          await client.connect()
+          return { action: 'read', path: '/', stats: { added: 0, removed: 0 }, status: 'success', content: `Connected MCP server: ${client.name}` }
+        } catch (e: any) {
+          return { action: 'read', path: '/', stats: { added: 0, removed: 0 }, status: 'error', error: `MCP connect failed: ${e.message}` }
+        }
+      }
+      if (tc.name === 'mcp_remove_server') {
+        mcp.remove(tc.arguments.name)
+        return { action: 'read', path: '/', stats: { added: 0, removed: 0 }, status: 'success', content: `Removed MCP server: ${tc.arguments.name}` }
+      }
+      if (tc.name === 'mcp_list_server_tools') {
+        const serverName = tc.arguments.server
+        const clients = serverName ? [mcp.get(serverName)].filter(Boolean) : mcp.list()
+        if (clients.length === 0) return { action: 'read', path: '/', stats: { added: 0, removed: 0 }, status: 'success', content: 'No tools found.' }
+        const lines: string[] = []
+        for (const client of clients) {
+          for (const tool of client!.getTools()) {
+            lines.push(`[${client!.name}] ${tool.name}: ${tool.description}`)
+          }
+        }
+        return { action: 'read', path: '/', stats: { added: 0, removed: 0 }, status: 'success', content: lines.join('\n') || 'No tools found.' }
+      }
+      if (tc.name === 'mcp_call_tool') {
+        const client = mcp.get(tc.arguments.server)
+        if (!client) return { action: 'read', path: '/', stats: { added: 0, removed: 0 }, status: 'error', error: `MCP server not found: ${tc.arguments.server}` }
+        try {
+          const result = await client.callTool(tc.arguments.tool, tc.arguments.args || {})
+          return { action: 'read', path: '/', stats: { added: 0, removed: 0 }, status: 'success', content: typeof result === 'string' ? result : JSON.stringify(result, null, 2) }
+        } catch (e: any) {
+          return { action: 'read', path: '/', stats: { added: 0, removed: 0 }, status: 'error', error: `MCP tool call failed: ${e.message}` }
+        }
+      }
+      if (tc.name === 'mcp_list_resources') {
+        const serverName = tc.arguments.server
+        const clients = serverName ? [mcp.get(serverName)].filter(Boolean) : mcp.list()
+        const lines: string[] = []
+        for (const client of clients) {
+          for (const resource of client!.getResources()) {
+            lines.push(`[${client!.name}] ${resource.uri} — ${resource.name || resource.description || ''}`)
+          }
+        }
+        return { action: 'read', path: '/', stats: { added: 0, removed: 0 }, status: 'success', content: lines.join('\n') || 'No resources found.' }
+      }
+    }
+
+    // ── lsp: Language Server Protocol ──
+    if (tc.name.startsWith('lsp_')) {
+      const store = useAppStore.getState()
+      const workDir = store.builds[buildId]?.workDir || ''
+      if (!workDir) return { action: 'read', path: '/', stats: { added: 0, removed: 0 }, status: 'error', error: 'No working directory set' }
+      try {
+        if (tc.name === 'lsp_go_to_definition' || tc.name === 'lsp_find_references' || tc.name === 'lsp_hover' || tc.name === 'lsp_document_symbols') {
+          const filePath = tc.arguments.path
+          const config = getServerForFile(filePath)
+          if (!config) return { action: 'read', path: '/', stats: { added: 0, removed: 0 }, status: 'error', error: `No LSP server configured for file type: ${filePath}` }
+          const client = await lspStartServer(config, 'file://' + workDir.replace(/\\/g, '/'))
+          const fileUri = 'file:///' + workDir.replace(/\\/g, '/').replace(/\/+$/, '') + '/' + filePath.replace(/^\/+/, '').replace(/\\/g, '/')
+          try {
+            const storeFs = useAppStore.getState().builds[buildId]?.projectFiles?.find(f => f.path === filePath)
+            if (storeFs) await client.openDocument(fileUri, config.language, storeFs.content)
+          } catch {}
+          if (tc.name === 'lsp_go_to_definition') {
+            const loc = await client.goToDefinition(fileUri, tc.arguments.line, tc.arguments.character)
+            return { action: 'read', path: '/', stats: { added: 0, removed: 0 }, status: 'success', content: loc ? `${loc.uri}:${loc.range.start.line}:${loc.range.start.character}` : 'No definition found.' }
+          }
+          if (tc.name === 'lsp_find_references') {
+            const refs = await client.findReferences(fileUri, tc.arguments.line, tc.arguments.character)
+            return { action: 'read', path: '/', stats: { added: 0, removed: 0 }, status: 'success', content: refs.length === 0 ? 'No references found.' : refs.map(r => `${r.uri}:${r.range.start.line}:${r.range.start.character}`).join('\n') }
+          }
+          if (tc.name === 'lsp_hover') {
+            const hov = await client.hover(fileUri, tc.arguments.line, tc.arguments.character)
+            return { action: 'read', path: '/', stats: { added: 0, removed: 0 }, status: 'success', content: hov?.contents || 'No hover information.' }
+          }
+          if (tc.name === 'lsp_document_symbols') {
+            const syms = await client.documentSymbols(fileUri)
+            return { action: 'read', path: '/', stats: { added: 0, removed: 0 }, status: 'success', content: syms.length === 0 ? 'No symbols found.' : syms.map(s => `${s.kind}: ${s.name}${s.range ? ` (${s.range.start.line}:${s.range.start.character})` : ''}`).join('\n') }
+          }
+        }
+      } catch (e: any) {
+        return { action: 'read', path: '/', stats: { added: 0, removed: 0 }, status: 'error', error: `LSP error: ${e.message}` }
+      }
+    }
+
+    // ── pty: Pseudo-terminal execution ──
+    if (tc.name === 'pty_exec') {
+      const store = useAppStore.getState()
+      const workDir = store.builds[buildId]?.workDir || tc.arguments.cwd
+      const signal = new AbortController()
+      try {
+        const result = await ptyExec(tc.arguments.command, { cwd: workDir, timeout: tc.arguments.timeout, signal: signal.signal })
+        return {
+          action: 'read', path: '/', stats: { added: 0, removed: 0 },
+          status: result.code === 0 ? 'success' : 'error',
+          content: `Exit code: ${result.code}\n${result.stdout}${result.stderr ? '\nSTDERR:\n' + result.stderr : ''}`,
+        }
+      } catch (e: any) {
+        return { action: 'read', path: '/', stats: { added: 0, removed: 0 }, status: 'error', error: `PTY error: ${e.message}` }
+      }
+    }
+
+    // ── list_skills: Show discovered skills ──
+    if (tc.name === 'list_skills') {
+      const skills = defaultSkillManager.list()
+      return {
+        action: 'read', path: '/', stats: { added: 0, removed: 0 },
+        status: 'success',
+        content: skills.length === 0 ? 'No skills discovered.' : skills.map(s => `- ${s.name}${s.description ? ': ' + s.description : ''}`).join('\n'),
+      }
+    }
+
+    // ── todo: Session task tracking ──
+    if (tc.name.startsWith('todo_')) {
+      const sessionId = String(buildId)
+      const todo = defaultTodoManager
+      if (tc.name === 'todo_add') {
+        todo.add(sessionId, tc.arguments.content, tc.arguments.priority || 'medium')
+        const pending = todo.pendingCount(sessionId)
+        return { action: 'read', path: '/', stats: { added: 0, removed: 0 }, status: 'success', content: `Added: ${tc.arguments.content}. Pending: ${pending}` }
+      }
+      if (tc.name === 'todo_list') {
+        const items = todo.get(sessionId)
+        return { action: 'read', path: '/', stats: { added: 0, removed: 0 }, status: 'success', content: items.length === 0 ? 'No todos.' : items.map(i => `[${i.status}] ${i.id}: ${i.content} (${i.priority})`).join('\n') }
+      }
+      if (tc.name === 'todo_mark_done') {
+        todo.markDone(sessionId, tc.arguments.id)
+        return { action: 'read', path: '/', stats: { added: 0, removed: 0 }, status: 'success', content: `Done: ${tc.arguments.id}` }
+      }
+    }
+
+    // ── acp: Agent-to-Agent Communication ──
+    if (tc.name.startsWith('acp_')) {
+      if (tc.name === 'acp_connect') {
+        const client = new ACPClient(tc.arguments.url)
+        try {
+          await client.initialize()
+          if (tc.arguments.token) await client.authenticate('token', { token: tc.arguments.token })
+          return { action: 'read', path: '/', stats: { added: 0, removed: 0 }, status: 'success', content: `Connected to ACP agent at ${tc.arguments.url}` }
+        } catch (e: any) {
+          return { action: 'read', path: '/', stats: { added: 0, removed: 0 }, status: 'error', error: `ACP connect failed: ${e.message}` }
+        }
+      }
+      if (tc.name === 'acp_prompt') {
+        const url = useAppStore.getState().apiSettings.baseUrl
+        if (!url) return { action: 'read', path: '/', stats: { added: 0, removed: 0 }, status: 'error', error: 'No API URL configured for ACP' }
+        const client = new ACPClient(url)
+        try {
+          await client.initialize()
+          let sessionId = tc.arguments.session_id
+          if (!sessionId) {
+            const sess = await client.newSession({ model: tc.arguments.model })
+            sessionId = sess.id
+          }
+          const resp = await client.prompt({ sessionId, message: tc.arguments.message })
+          return { action: 'read', path: '/', stats: { added: 0, removed: 0 }, status: 'success', content: resp.text }
+        } catch (e: any) {
+          return { action: 'read', path: '/', stats: { added: 0, removed: 0 }, status: 'error', error: `ACP prompt failed: ${e.message}` }
+        }
+      }
+    }
+
+    // ── patch_apply: Apply structured patch ──
+    if (tc.name === 'patch_apply') {
+      try {
+        const hunks = patchParse(tc.arguments.patch)
+        const results: string[] = []
+        for (const hunk of hunks) {
+          if (hunk.type === 'add') {
+            const store = useAppStore.getState()
+            store.addBuildFile(buildId, { path: hunk.path, content: hunk.contents })
+            results.push(`+ ${hunk.path} (created)`)
+          } else if (hunk.type === 'delete') {
+            const store = useAppStore.getState()
+            store.removeBuildFile(buildId, hunk.path)
+            results.push(`- ${hunk.path} (deleted)`)
+          } else if (hunk.type === 'update') {
+            const store = useAppStore.getState()
+            const existing = store.builds[buildId]?.projectFiles?.find(f => f.path === hunk.path)
+            if (existing) {
+              let content = existing.content
+              for (const chunk of hunk.chunks) {
+                const oldStr = chunk.oldLines.join('\n')
+                const newStr = chunk.newLines.join('\n')
+                if (content.includes(oldStr)) {
+                  content = content.replace(oldStr, newStr)
+                }
+              }
+              store.updateBuildFile(buildId, hunk.path, content)
+              results.push(`~ ${hunk.path} (updated)`)
+            } else {
+              results.push(`~ ${hunk.path} (not found, skipped)`)
+            }
+          }
+        }
+        return { action: 'read', path: '/', stats: { added: 0, removed: 0 }, status: 'success', content: `Patch applied:\n${results.join('\n')}` }
+      } catch (e: any) {
+        return { action: 'read', path: '/', stats: { added: 0, removed: 0 }, status: 'error', error: `Patch error: ${e.message}` }
+      }
+    }
+
     // ── ls: list directory (reads from real filesystem) ──
     if (tc.name === 'ls') {
       const rawPath = tc.arguments.path || '.'
@@ -690,85 +896,7 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
       return { action: 'read', path: rawPath, stats: { added: 0, removed: 0 }, status: 'success', content: listing }
     }
 
-    // ── glob_search: find files by pattern ──
-    if (tc.name === 'glob_search') {
-      const pattern = tc.arguments.pattern || ''
-      const regexBody = pattern.replace(/\*\*|\*|\?/g, (m) => m === '**' ? '.*' : m === '*' ? '[^/]*' : '.')
-      const regex = new RegExp('^' + regexBody + '$')
-      // Try real filesystem first
-      if (window.electronAPI) {
-        try {
-          const store = useAppStore.getState()
-          const workDir = store.builds[buildId]?.workDir
-          const buildDir = (workDir || await window.electronAPI.getBuildDirectory())
-          const files = await window.electronAPI.readDirRecursive(buildDir)
-          const matches = files.map(f => f.replace(buildDir.replace(/\\/g, '/'), '').replace(/^[/\\]/, '').replace(/\\/g, '/')).filter(f => f && regex.test(f))
-          const listing = matches.length ? matches.join('\n') : '(no matches)'
-          return { action: 'read', path: `glob:${pattern}`, stats: { added: 0, removed: 0 }, status: 'success', content: listing }
-        } catch (e) {
-          // Fallback to in-memory
-        }
-      }
-      const state = useAppStore.getState()
-      const matches = state.builds[buildId].projectFiles.filter(f => regex.test(f.path))
-      const listing = matches.length ? matches.map(f => f.path).join('\n') : '(no matches)'
-      return { action: 'read', path: `glob:${pattern}`, stats: { added: 0, removed: 0 }, status: 'success', content: listing }
-    }
-
-    // ── grep_search: search file contents by regex ──
-    if (tc.name === 'grep_search') {
-      const pattern = tc.arguments.pattern || ''
-      // Try real filesystem first
-      if (window.electronAPI) {
-        try {
-          const store = useAppStore.getState()
-          const workDir = store.builds[buildId]?.workDir
-          const buildDir = (workDir || await window.electronAPI.getBuildDirectory())
-          const files = await window.electronAPI.readDirRecursive(buildDir)
-          const regex = new RegExp(pattern)
-          const results: string[] = []
-          for (const fullPath of files) {
-            try {
-              const content = await window.electronAPI.readFile(fullPath)
-              const lines = content.split('\n')
-              for (let i = 0; i < lines.length; i++) {
-                if (regex.test(lines[i])) {
-                  const relPath = fullPath.replace(buildDir.replace(/\\/g, '/'), '').replace(/^[/\\]/, '').replace(/\\/g, '/')
-                  results.push(`${relPath}:${i + 1}: ${lines[i]}`)
-                }
-              }
-            } catch { /* skip unreadable */ }
-          }
-          const listing = results.length ? results.join('\n') : '(no matches)'
-          return { action: 'read', path: `grep:${pattern}`, stats: { added: 0, removed: 0 }, status: 'success', content: listing }
-        } catch (e) {
-          // Fallback to in-memory
-        }
-      }
-      const state = useAppStore.getState()
-      try {
-        const regex = new RegExp(pattern)
-        const files = state.builds[buildId].projectFiles
-        const loadIfNeeded = async (f: BuildFile) =>
-          f.contentLoaded ? f.content || '' : state.loadBuildFileContent(buildId, f.path)
-        const results = (await Promise.all(files.map(async f => {
-          const content = await loadIfNeeded(f)
-          const lines = content.split('\n')
-          const matches: string[] = []
-          for (let i = 0; i < lines.length; i++) {
-            if (regex.test(lines[i])) {
-              matches.push(`${f.path}:${i + 1}: ${lines[i]}`)
-            }
-          }
-          return matches
-        }))).flat()
-        const listing = results.length ? results.join('\n') : '(no matches)'
-        return { action: 'read', path: `grep:${pattern}`, stats: { added: 0, removed: 0 }, status: 'success', content: listing }
-      } catch {
-        return { action: 'read', path: `grep:${pattern}`, stats: { added: 0, removed: 0 }, status: 'error', error: 'Invalid regex pattern' }
-      }
-    }
-
+    // ── zip: archive build to zip ──
     if (tc.name === 'create_zip') {
       const fileName = tc.arguments.fileName || 'project.zip'
       const state = useAppStore.getState()
@@ -802,77 +930,6 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
       } catch (e: any) {
         return { action: 'run', path: fileName, stats: { added: 0, removed: 0 }, status: 'error', error: `Zip failed: ${e.message}` }
       }
-    }
-
-    if (['create_file', 'read_file', 'edit_file'].includes(tc.name)) {
-      const err = validatePath(path)
-      if (err) return { action: tc.name === 'create_file' ? 'create' : 'edit', path, stats: { added: 0, removed: 0 }, status: 'error', error: err }
-    }
-
-    const state = useAppStore.getState()
-        const existing = state.builds[buildId].projectFiles.find(f => f.path === path)
-
-    if (tc.name === 'create_file') {
-      const content = tc.arguments.content || ''
-      const lines = content.split('\n').length
-      let oldContent = existing ? existing.content || '' : ''
-      if (existing && !existing.contentLoaded) {
-        oldContent = await useAppStore.getState().loadBuildFileContent(buildId, path)
-      }
-      // Save checkpoint for undo
-      if (existing) saveCheckpoint(buildId, path, oldContent)
-      await withFileMutationQueue(path, async () => {
-        if (existing) {
-          updateBuildFile(buildId, path, content)
-        } else {
-          addBuildFile(buildId, { path, content })
-        }
-        if (window.electronAPI?.writeBuildFile) {
-          const store = useAppStore.getState()
-          const writePath = store.builds[buildId]?.workDir ? joinPaths(store.builds[buildId]!.workDir!, path) : path
-          await window.electronAPI.writeBuildFile({ filePath: writePath, content })
-        } else {
-          console.warn('[BuildAgent] electronAPI.writeBuildFile not available')
-        }
-      })
-      const node = createCanvasNode(path, content)
-      const existingNode = useAppStore.getState().canvasElements.find(e => e.componentId === 'build:' + path)
-      if (existingNode) {
-        const isHtml = path.endsWith('.html')
-        updateCanvasElement(existingNode.id, {
-          html: isHtml ? '' : wrapContent(content, path.split('.').pop() || '', path),
-          css: '',
-          iframeSrcDoc: isHtml ? content : undefined,
-        })
-      } else {
-        addCanvasElement(node)
-        const els = useAppStore.getState().canvasElements
-        if (els.length > 1) addConnection({ id: crypto.randomUUID?.() || Math.random().toString(36).slice(2), fromId: els[els.length - 2].id, toId: node.id })
-      }
-      if (path.endsWith('.html')) {
-        saveImport({ name: basename(path), html: content, css: '', js: '', source: 'build-agent' })
-      }
-      const stats = existing ? computeDiffStats(oldContent, content) : { added: lines, removed: 0 }
-      return { action: 'create', path, stats, status: 'success', content }
-    }
-
-    if (tc.name === 'read_file') {
-      if (!existing) return { action: 'read', path, stats: { added: 0, removed: 0 }, status: 'error', error: 'File not found' }
-      const startLine = tc.arguments.start_line ? parseInt(tc.arguments.start_line) : undefined
-      const endLine = tc.arguments.end_line ? parseInt(tc.arguments.end_line) : undefined
-
-      let content = existing.content || ''
-      // Lazy-load from disk if content not yet loaded
-      if (!existing.contentLoaded) {
-        content = await useAppStore.getState().loadBuildFileContent(buildId, path)
-      }
-      if (startLine !== undefined || endLine !== undefined) {
-        const lines = content.split('\n')
-        const start = startLine !== undefined ? Math.max(1, startLine) - 1 : 0
-        const end = endLine !== undefined ? Math.min(lines.length, endLine) : lines.length
-        content = lines.slice(start, end).join('\n')
-      }
-      return { action: 'read', path, stats: { added: 0, removed: 0 }, status: 'success', content }
     }
 
     if (tc.name === 'git_status') {
@@ -961,111 +1018,6 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
       await execTool({ name: 'create_file', arguments: { path: 'project_map.json', content } } as any)
       return { action: 'run', path: 'project_map.json', stats: { added: 0, removed: 0 }, status: 'success', content: 'Project map generated.' }
     }
-
-    if (tc.name === 'run_command') {
-      if (!window.electronAPI) {
-        return { action: 'run', path: '/', stats: { added: 0, removed: 0 }, status: 'error', error: 'Electron API not available. Please restart the app.' }
-      }
-      const store = useAppStore.getState()
-      const workDir = store.builds[buildId]?.workDir
-      const buildDir = (workDir || await window.electronAPI.getBuildDirectory())
-      const cmd = tc.arguments.command || ''
-      const cwd = tc.arguments.cwd ? joinPaths(buildDir, tc.arguments.cwd) : buildDir
-      
-      const approved = await requestPermission(cmd, cwd)
-      if (!approved) {
-        return { action: 'run', path: cwd || '/', stats: { added: 0, removed: 0 }, status: 'error', error: 'Command rejected by user' }
-      }
-      setIsShellRunning(true)
-      setRunningCommand(cmd)
-      try {
-        if (!window.electronAPI?.runCommand) {
-          throw new Error('Electron API runCommand not available')
-        }
-        const result = await window.electronAPI.runCommand({ command: cmd, cwd })
-        setIsShellRunning(false)
-        setRunningCommand('')
-        
-        // AUTO-HEALING: If error exists, auto-inject into conversation
-        if (result.exitCode !== 0) {
-          const autoFixMsg = `The command '${cmd}' failed with the following error:\n${result.stderr}\n\nPlease analyze the files involved and fix the issue immediately.`
-          conversationRef.current.push({ role: 'user', content: autoFixMsg })
-        }
-        
-        return {
-          action: 'run',
-          path: cwd || '/',
-          stats: { added: 0, removed: 0 },
-          status: result.exitCode === 0 ? 'success' : 'error',
-          content: truncateTerminalOutput((result.stdout + '\n' + result.stderr).trim()),
-          error: result.error || undefined,
-        }
-      } catch (e) {
-        setIsShellRunning(false)
-        setRunningCommand('')
-        throw e
-      }
-    }
-
-    if (!existing) return { action: 'edit', path, stats: { added: 0, removed: 0 }, status: 'error', error: 'File not found' }
-    setBuildEditingPaths(buildId, [path])
-
-    const oldStr = tc.arguments.old_str || ''
-    const newStr = tc.arguments.new_str || ''
-    const replaceAll = tc.arguments.replace_all === 'true'
-    let oldFull = existing.content || ''
-    if (!existing.contentLoaded) {
-      oldFull = await useAppStore.getState().loadBuildFileContent(buildId, path)
-    }
-
-    try {
-      // Strip BOM, normalize line endings, then apply edits
-      const { bom, text: cleanContent } = stripBom(oldFull)
-      const originalEnding = detectLineEnding(cleanContent)
-      const edits = replaceAll
-        ? [{ oldText: oldStr, newText: newStr }]
-        : [{ oldText: oldStr, newText: newStr }]
-
-      const { baseContent, newContent: editedContent } = applyEditsToNormalizedContent(
-        normalizeToLF(cleanContent),
-        edits,
-        path,
-      )
-      const finalContent = bom + restoreLineEndings(editedContent, originalEnding)
-
-      if (finalContent === oldFull) {
-        setBuildEditingPaths(buildId, [])
-        return { action: 'edit', path, stats: { added: 0, removed: 0 }, status: 'error', error: 'No changes made — replacement produced identical content' }
-      }
-
-      // Save checkpoint for undo
-      saveCheckpoint(buildId, path, oldFull)
-      await withFileMutationQueue(path, async () => {
-        updateBuildFile(buildId, path, finalContent)
-        if (window.electronAPI?.writeBuildFile) {
-          const store = useAppStore.getState()
-          const writePath = store.builds[buildId]?.workDir ? joinPaths(store.builds[buildId]!.workDir!, path) : path
-          await window.electronAPI.writeBuildFile({ filePath: writePath, content: finalContent })
-        } else {
-          console.warn('[BuildAgent] electronAPI.writeBuildFile not available')
-        }
-      })
-      const stats = computeDiffStats(oldFull, finalContent)
-      const existingNode = useAppStore.getState().canvasElements.find(e => e.componentId === 'build:' + path)
-      if (existingNode) {
-        const isHtml = path.endsWith('.html')
-        updateCanvasElement(existingNode.id, {
-          html: isHtml ? '' : wrapContent(finalContent, path.split('.').pop() || '', path),
-          css: '',
-          iframeSrcDoc: isHtml ? finalContent : undefined,
-        })
-      }
-      setBuildEditingPaths(buildId, [])
-      return { action: 'edit', path, stats, status: 'success', content: finalContent }
-    } catch (err: any) {
-      setBuildEditingPaths(buildId, [])
-      return { action: 'edit', path, stats: { added: 0, removed: 0 }, status: 'error', error: err.message || 'Edit failed' }
-    }
     } catch (err: any) {
       console.error('[BuildAgent] execTool unexpected error:', err)
       const tc = (arguments[0] as BuildToolCall) || {} // This is a bit tricky since we are in a callback
@@ -1139,6 +1091,9 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
     } else if (provider === 'openrouter') {
       url = 'https://openrouter.ai/api/v1/chat/completions'
       if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`
+    } else if (provider === 'deepseek') {
+      url = `${(baseUrl || 'https://api.deepseek.com').replace(/\/+$/, '')}/v1/chat/completions`
+      if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`
     } else if (provider === 'gemini') {
       const cleanModel = modelName.replace(/^models\//, '')
       url = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:generateContent`
@@ -1146,7 +1101,7 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
     }
 
     const isGemini = provider === 'gemini'
-
+    ;(globalThis as any).thinkingEffort = apiSettings.thinkingEffort || 'default'
     if (isGemini) {
       const geminiResult = await executeStreamingApi(
         messages as BuildMessage[],
@@ -1173,6 +1128,10 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
       model: modelName, messages,
       temperature: 0.2, max_tokens: 32768,
     }
+    if (modelName.includes('o1') || modelName.includes('o3-mini')) {
+      bodyObj.reasoning_effort = apiSettings.thinkingEffort === 'default' ? 'medium' : apiSettings.thinkingEffort
+      delete bodyObj.temperature
+    }
     // Apply tool overrides per provider
     const override = TOOL_OVERRIDES[provider]
     const toolsForRequest = override
@@ -1181,7 +1140,6 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
           function: { ...t.function, ...override, parameters: t.function.parameters },
         }))
       : TOOL_DEFS
-    // llama.cpp/ollama often don't support OpenAI tool calling — skip tools and rely on fallback text parsing
     if (provider !== 'llama' && provider !== 'ollama') {
       bodyObj.tools = toolsForRequest
       bodyObj.tool_choice = 'auto'
@@ -1224,20 +1182,30 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
             const delta = parsed.choices?.[0]?.delta
             if (delta?.content) {
               fullText = processChunkContent(delta.content, fullText)
-              if (!isFallbackToolMode && looksLikeToolCallJson(fullText)) {
+              // Only check the TAIL of the text for tool-call JSON.
+              // Checking fullText caused false triggers when a plan was written before the JSON.
+              const tail = fullText.slice(-300)
+              if (!isFallbackToolMode && looksLikeToolCallJson(tail)) {
                 isFallbackToolMode = true
-                fallbackToolText = fullText
+                // The tool JSON starts somewhere in the tail — split text from JSON
+                const jsonStart = Math.max(0, fullText.length - 300) +
+                  Math.max(tail.indexOf('[{"name'), tail.indexOf('{"name'))
+                fallbackToolText = fullText.slice(jsonStart)
+                // The text before the JSON is clean — flush it if not already sent
+                const cleanPreamble = fullText.slice(0, jsonStart).trim()
+                if (cleanPreamble && textBuffer) {
+                  // already streamed via onText — no action needed
+                  textBuffer = ''
+                }
+              } else if (isFallbackToolMode) {
+                fallbackToolText += delta.content
+              } else {
+                textBuffer += delta.content
+                onText(delta.content)
+              }
+              if (!isFallbackToolMode && textBuffer.length > 1000) {
                 textBuffer = ''
               }
-    if (isFallbackToolMode) {
-      fallbackToolText += delta.content
-    } else {
-      textBuffer += delta.content
-      onText(delta.content) // Send immediately for live streaming
-    }
-    if (textBuffer.length > 1000) {
-      textBuffer = '' // Prevent memory leak but keep streaming live
-    }
             }
             if (delta?.tool_calls) {
               for (const tc of delta.tool_calls) {
@@ -1279,7 +1247,7 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
           })
         }
       } else {
-        onText('\n⚠ A tool call from the model could not be parsed and was dropped.')
+        console.warn('[streamWithCallbacks] tool call text could not be parsed:', fallbackToolText.slice(0, 200))
       }
     }
 
@@ -1368,10 +1336,6 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
       let stepCount = 0
       const MAX_STEPS = 30
 
-      // Per-turn guards
-      let codeFileTouchedThisTurn = false
-      let ranCommandThisTurn = false
-      let verifyNudged = false
       let lastToolSig = ''
       let repeatSigCount = 0
 
@@ -1383,6 +1347,10 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
       await syncFromDisk()
 
       while (stepCount < MAX_STEPS) {
+        // Per-step guards — reset every iteration
+        let codeFileTouchedThisTurn = false
+        let ranCommandThisTurn = false
+        let verifyNudged = false
         try {
           stepCount++
           abortRef.current?.abort()
@@ -1413,19 +1381,22 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
           const onToolPreview = makePreviewHandler()
 
       const { text, toolCalls, inlineData } = await streamWithCallbacks(conversation, abortRef.current!.signal, (chunk) => {
-        // Prevent leaking raw tool calls or plan tags
-        const cleanChunk = chunk.replace(/<plan>[\s\S]*?<\/plan>/gi, '')
-                                .replace(/\[\{"name":[\s\S]*?\}\]/gi, '')
-        
-        const cur = useAppStore.getState().builds[buildId].timeline
-            const target = cur.find(t => t.id === assistantId)
-            if (!target) return
-            const newContent = (target.content || '') + cleanChunk
-            updateTimelineItem(buildId, assistantId, { content: newContent })
-            tokenCountRef.current = calcTokens(newContent)
-            setTokenCount(tokenCountRef.current)
-          }, onToolPreview)
-
+        // Only stream text that isn't a tool call JSON — suppress raw JSON in real-time
+        if (!looksLikeToolCallJson(chunk)) {
+          const cleanChunk = chunk.replace(/<plan>[\s\S]*?<\/plan>/gi, '')
+                                  .replace(/\[\{"name":[\s\S]*?\}\]/gi, '')
+                                  .replace(/\{"name"\s*:\s*"[^"]+"[\s\S]*?"args"\s*:\s*\{[\s\S]*?\}\}/g, '')
+          
+          const cur = useAppStore.getState().builds[buildId].timeline
+          const target = cur.find(t => t.id === assistantId)
+          if (!target) return
+          const newContent = (target.content || '') + cleanChunk
+          updateTimelineItem(buildId, assistantId, { content: newContent })
+          tokenCountRef.current = calcTokens(newContent)
+          setTokenCount(tokenCountRef.current)
+        }
+      }, onToolPreview)
+      
       // Save inline media (images, audio, etc.) from Gemini multimodal response
       if (inlineData && inlineData.length > 0) {
         for (const item of inlineData) {
@@ -1447,24 +1418,22 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
       const cleanText = text.trim()
       const hasTools = toolCalls.length > 0
 
+      // After streaming: replace timeline item with cleaned text (overwrite raw streamed content)
+      const displayText = cleanText.replace(/\[\{"name":[\s\S]*?\}\]/gi, '')
+                                   .replace(/\{"name"\s*:\s*"[^"]+"[\s\S]*?"args"\s*:\s*\{[\s\S]*?\}\}/g, '')
+                                   .replace(/```[\w]*\n?[\s\S]*?```/g, '')
+                                   .trim()
+       if (displayText || hasTools) {
+         updateTimelineItem(buildId, assistantId, { content: displayText })
+       } else {
+         removeTimelineItem(buildId, assistantId)
+       }
+
       if (!hasTools) {
-        if (!cleanText) {
-          removeTimelineItem(buildId, assistantId)
-        }
-        // Verification nudge ENABLED: Only if intent is BUILD and files were touched
-        const lastUserMsg = conversationRef.current[conversationRef.current.length - 1].content.toUpperCase()
-        const isBuildIntent = lastUserMsg.includes('[BUILD]') || !lastUserMsg.includes('[RESEARCH]')
-        
-        if (true && isBuildIntent && codeFileTouchedThisTurn && !ranCommandThisTurn && !verifyNudged) {
-          verifyNudged = true
-          const nudge = '⚠ لقد قمت بتعديل كود برمجى ولكنك لم تقم بتشغيله للتحقق (run_command). يرجى التحقق من الكود قبل إنهاء المهمة.'
-          addTimelineItem(buildId, { type: 'assistant', id: nextId(), content: nudge })
+        if (cleanText) {
+          conversation.push({ role: 'assistant', content: cleanText })
         }
         break
-      }
-
-      if (!cleanText) {
-        removeTimelineItem(buildId, assistantId)
       }
 
       const pendingIds: string[] = []
@@ -1492,8 +1461,10 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
       const readOps = toolCalls.filter(tc => isReadOp(tc.name))
       const writeOps = toolCalls.filter(tc => !isReadOp(tc.name))
 
-      // Execute reads in parallel
+      // Execute reads in parallel — mark each as 'loading' immediately so user sees activity
       const readResults = await Promise.all(readOps.map(async (tc) => {
+        const idx = pendingIds[toolCalls.indexOf(tc)]
+        if (idx) updateTimelineItem(buildId, idx, { status: 'loading' as any })
         const ev = await execTool(tc)
         return { tc, ev }
       }))
@@ -1539,28 +1510,28 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
           const lines = ((args.content as string) || '').split('\n')
           previewContent = lines.slice(0, 50).join('\n')
           if (lines.length > 50) previewContent += '\n...'
-          diffPreview = lines.map(l => `+${l}`).join('\n').slice(0, 2000)
+          diffPreview = lines.map(l => `+${l}`).join('\n').slice(0, 100000)
         }
         if (tc.name === 'edit_file' && ev.status === 'success') {
           const oldStr = (args.old_str as string) || ''
           const newStr = (args.new_str as string) || ''
           
-          // If oldStr is empty but the edit was successful, it might be an addition
-          const changes: Change[] = diffLines(oldStr, newStr)
+          // Build line-level diff preview from oldStr → newStr using proper diff
+          const oldLines = oldStr.split('\n')
+          const newLines = newStr.split('\n')
           const parts: string[] = []
-          
+          const changes = diffArrays(oldLines, newLines)
           for (const change of changes) {
-            const lines = change.value.split('\n')
-            for (const line of lines) {
-              if (line === '') continue
-              if (change.added) parts.push(`+${line}`)
-              else if (change.removed) parts.push(`-${line}`)
-              else parts.push(` ${line}`)
+            if (change.added) {
+              for (const line of change.value) parts.push(`+${line}`)
+            } else if (change.removed) {
+              for (const line of change.value) parts.push(`-${line}`)
+            } else {
+              for (const line of change.value) parts.push(` ${line}`)
             }
           }
           
-          // Ensure we have a preview even if the diff is empty but status is success
-          diffPreview = parts.length > 0 ? parts.join('\n').slice(0, 2000) : `Modified ${ev.path}`
+          diffPreview = parts.length > 0 ? parts.join('\n').slice(0, 100000) : `Modified ${ev.path}`
         }
         if (tc.name === 'run_command' && ev.content) {
           const lines = ev.content.split('\n')
@@ -1568,7 +1539,7 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
           if (lines.length > 30) previewContent += '\n...'
         }
         const isHtml = ev.path?.endsWith('.html')
-        const fullContent = isHtml && (tc.name === 'create_file' || tc.name === 'edit_file') ? (ev.content || '')
+        const fullContent = isHtml && (tc.name === 'create_file' || tc.name === 'edit_file' || tc.name === 'read_file') ? (ev.content || '')
             : undefined
         updateTimelineItem(buildId, pendingIds[i], {
           path: ev.path, action: ev.action, stats: ev.stats, status: ev.status, error: ev.error,
@@ -1607,13 +1578,13 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
       const toolCallJson = JSON.stringify(toolCalls.map(tc => ({ name: tc.name, args: tc.arguments })))
       conversation.push({ role: 'assistant', content: toolCallJson })
       let toolResultMsg = `Tool results:\n${resultLines.join('\n')}\n\nContinue with next steps if needed, or write summary if done.`
-      if (repeatSigCount === 3) {
-        toolResultMsg += `\n\n⚠ NOTICE: You just called the exact same tool with identical arguments 3 times in a row with no new information. Do NOT repeat it again — try a different command, or explain the problem instead.`
-      }
-      conversation.push({ role: 'user', content: toolResultMsg })
-      if (repeatSigCount === 3) {
-        addTimelineItem(buildId, { type: 'user', id: nextId(), content: '⚠ Stop.' })
-      }
+       if (repeatSigCount === 5) {
+         toolResultMsg += `\n\n⚠ NOTICE: You just called the exact same tool with identical arguments 5 times in a row with no new information. Do NOT repeat it again — try a different command, or explain the problem instead.`
+       }
+       conversation.push({ role: 'user', content: toolResultMsg })
+       if (repeatSigCount === 5) {
+         addTimelineItem(buildId, { type: 'user', id: nextId(), content: '⚠ Stop.' })
+       }
       } catch (err: any) {
         if (err.name === 'AbortError') return
         
@@ -1681,6 +1652,8 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
         }
         const state = useAppStore.getState()
         state.syncBuildFileListing(buildId, relPaths)
+        // Load config from the new directory
+        applyConfig(dir).catch(() => {})
       }
       return
     }
@@ -1756,6 +1729,7 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
       content: imageContent || prompt,
       previewContent: imageContent ? prompt : undefined,
     })
+    setUserScrolledUp(false)
 
     // Add file attachments as file timeline items with visible content
     fileAttachments.forEach(att => {
@@ -1796,14 +1770,31 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
         currentFiles.map(f => `- ${f.path}`).join('\n')
       : 'No files exist in this project yet.'
 
-    conversationRef.current = [
-      { role: 'system', content: buildSystemPrompt(apiSettings.provider, useAppStore.getState().systemPrompt) + '\n\n' + fileList },
-      ...useAppStore.getState().builds[buildId].timeline.filter(t => t.type !== 'file').map(t => ({
-        role: t.type === 'user' ? 'user' as const : 'assistant' as const,
-        content: t.content || '',
-      })),
-      { role: 'user', content: conversationContent },
-    ]
+    // ── Discover skills for system prompt guidance ──
+    const workDir = state.builds[buildId]?.workDir
+    if (workDir) defaultSkillManager.discover(workDir)
+    const skillGuidance = defaultSkillManager.buildGuidance(defaultSkillManager.list())
+    const skillBlock = skillGuidance ? `\n\nSKILL GUIDES:\n${skillGuidance}` : ''
+
+    // ── Build session context (reminders, todos) ──
+    const sessionMgr = new SessionManager(String(buildId))
+    const sessionPrompt = sessionMgr.buildSystemPrompt()
+    const sessionBlock = sessionPrompt ? `\n\n${sessionPrompt}` : ''
+
+    // ── Rebuild conversation only on first message; afterwards just append ──
+    const isFirstMessage = conversationRef.current.length === 0
+    if (isFirstMessage) {
+      conversationRef.current = [
+        { role: 'system', content: buildSystemPrompt(apiSettings.provider, useAppStore.getState().systemPrompt) + skillBlock + sessionBlock + '\n\n' + fileList },
+        { role: 'user', content: conversationContent },
+      ]
+    } else {
+      // Refresh only the system prompt (first message) with updated file list, then append new user turn
+      if (conversationRef.current[0]?.role === 'system') {
+        conversationRef.current[0].content = buildSystemPrompt(apiSettings.provider, useAppStore.getState().systemPrompt) + skillBlock + sessionBlock + '\n\n' + fileList
+      }
+      conversationRef.current.push({ role: 'user', content: conversationContent })
+    }
 
     try {
       const stepCount = (await runAgentLoop(conversationRef.current)) ?? 0
@@ -1876,7 +1867,16 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
     setBuildIsRunning(buildId, false); 
     setContextPercent(0) 
   }
-  const handleClear = () => { clearTimeline(buildId); setContextPercent(0) }
+  const handleClear = () => { 
+    clearTimeline(buildId)
+    setContextPercent(0) 
+    setUserScrolledUp(false)
+    setTimeout(() => {
+      if (buildOutputRef.current) {
+        buildOutputRef.current.scrollTop = buildOutputRef.current.scrollHeight
+      }
+    }, 0)
+  }
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleBuild() }
   }
@@ -2045,19 +2045,60 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
     }
   }, [input])
 
-  // Load saved conversation on mount — only if timeline is empty to avoid duplicate keys
+  // Load saved conversation on mount — exactly once per buildId
   useEffect(() => {
+    const key = `conv-loaded-${buildId}`
+    if (sessionStorage.getItem(key)) return
+
+    // Restore ALL saved builds when the first BuildAgent mounts
+    if (buildId === 0) {
+      const savedBuilds = loadAllSavedConversations()
+      if (savedBuilds) {
+        const state = useAppStore.getState()
+        for (const [id, saved] of Object.entries(savedBuilds)) {
+          const bId = Number(id)
+          const existing = state.builds[bId]
+          if (!existing) {
+            state.addBuild(bId)
+          }
+          if (saved.timeline && saved.timeline.length > 0) {
+            const existingTimeline = useAppStore.getState().builds[bId]?.timeline ?? []
+            if (existingTimeline.length === 0) {
+              for (const item of saved.timeline) {
+                useAppStore.getState().addBuildTimelineItem(bId, item as BuildTimelineItem)
+              }
+            }
+          }
+          if (saved.workDir) {
+            useAppStore.getState().setBuildWorkDir(bId, saved.workDir)
+          }
+        }
+        // Ensure splitPaneBuildIds includes all restored builds
+        const updatedState = useAppStore.getState()
+        const allIds = Object.keys(savedBuilds).map(Number).sort((a, b) => a - b)
+        if (allIds.length > 1) {
+          updatedState.setSplitPaneBuildIds(allIds)
+        }
+        sessionStorage.setItem(key, '1')
+        return
+      }
+    }
+
+    // Fallback: load single build from legacy key
     const saved = loadSavedConversation(buildId)
-    if (saved && saved.timeline && saved.timeline.length > 0 && timeline.length === 0) {
+    if (saved && saved.timeline && saved.timeline.length > 0) {
       const state = useAppStore.getState()
+      const existing = state.builds[buildId]?.timeline ?? []
+      if (existing.length > 0) return
       for (const item of saved.timeline) {
         state.addBuildTimelineItem(buildId, item as BuildTimelineItem)
       }
     }
+    sessionStorage.setItem(key, '1')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [buildId])
 
-  const handleRevert = (item: BuildTimelineItem) => {
+  const handleRevert = async (item: BuildTimelineItem) => {
     setInput(item.content || '')
     const state = useAppStore.getState()
     const build = state.builds[buildId]
@@ -2075,7 +2116,7 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
     }
 
     // For each affected file, find the last version before the revert point
-    const prevVersions = new Map<string, string>()
+    const prevVersions = new Map<string, string | null>()
     for (const path of affectedPaths) {
       let found = false
       for (let i = index - 1; i >= 0; i--) {
@@ -2087,7 +2128,19 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
         }
       }
       if (!found) {
-        prevVersions.set(path, '') // empty = file didn't exist before
+        // File existed before session — try to read original from disk
+        try {
+          const diskContent = window.electronAPI
+            ? await window.electronAPI.readBuildFile(path)
+            : null
+          if (diskContent !== null && diskContent !== undefined) {
+            prevVersions.set(path, diskContent)
+          } else {
+            prevVersions.set(path, null) // null = file genuinely didn't exist
+          }
+        } catch {
+          prevVersions.set(path, null)
+        }
       }
     }
 
@@ -2099,11 +2152,9 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
     // Restore files to their previous state (store + actual filesystem)
     const workDir = build.workDir
     for (const [path, content] of prevVersions) {
-      if (content === '') {
+      if (content === null) {
+        // File didn't exist before — remove it
         state.removeBuildFile(buildId, path)
-        if (workDir) {
-          window.electronAPI?.writeBuildFile({ filePath: path, content: '' }).catch(() => {})
-        }
       } else {
         state.updateBuildFile(buildId, path, content)
         if (workDir) {
@@ -2134,7 +2185,7 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden', position: 'relative' }}>
+    <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       <style>{`
         .build-agent-root {
           --font-xxs: clamp(7px, 0.9vw, 10px);
@@ -2144,8 +2195,13 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
           --font-lg: clamp(14px, 2vw, 22px);
           --font-xl: clamp(16px, 2.5vw, 28px);
         }
+        .build-agent-root .ba-scroll::-webkit-scrollbar{width:6px;height:6px}
+        .build-agent-root .ba-scroll::-webkit-scrollbar-track{background:transparent}
+        .build-agent-root .ba-scroll::-webkit-scrollbar-thumb{background:#444;border-radius:3px}
+        .build-agent-root .ba-scroll::-webkit-scrollbar-thumb:hover{background:#555}
+        .build-agent-root .ba-scroll{scrollbar-width:thin;scrollbar-color:#444 transparent;overscroll-behavior:contain}
       `}</style>
-      <div className="build-agent-root" style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden', position: 'relative' }}>
+      <div className="build-agent-root" style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       <div style={{ height: 28, WebkitAppRegion: 'drag' as any, background: '#121212', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 2, padding: '0 4px' }}>
         <div style={{ flex: 1 }} />
         <span style={{ color: '#999', fontSize: 11, fontWeight: 600, letterSpacing: 2.5, userSelect: 'none' }}>BOWOW</span>
@@ -2161,7 +2217,7 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
           title="Close">✕</button>
       </div>
       </div>
-      <div ref={buildOutputRef} style={{ flex: 1, overflow: 'hidden auto', padding: showSettings ? 0 : '4px 0', position: 'relative', maxWidth: showSettings ? 'none' : 800, margin: showSettings ? 0 : '0 auto', width: '100%' }}>
+      <div ref={buildOutputRef} className="ba-scroll" style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', padding: showSettings ? 0 : '4px 0', position: 'relative', width: '100%', maxHeight: '100%' }}>
         {showSettings ? (
           <SettingsModal inline onClose={() => setShowSettings(false)} />
         ) : (<>
@@ -2199,28 +2255,34 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
                        <span style={{ fontWeight: 500 }}>{item.action === 'run' ? 'Shell Execution' : (item.path || '')}</span>
                        {item.stats && item.stats.added > 0 && (
                          <span style={{
-                           background: 'rgba(18, 18, 18, 0.15)', color: '#4caf50',
-                           fontWeight: 700, fontSize: 'var(--font-xxs)', padding: '1px 5px', borderRadius: 3,
-                           letterSpacing: 0.3,
+                            background: 'rgba(18, 18, 18, 0.15)', color: '#4caf50',
+                            fontWeight: 700, fontSize: 'var(--font-sm)', padding: '2px 6px', borderRadius: 3,
+                            letterSpacing: 0.3,
                          }}>+{item.stats.added}</span>
                        )}
                        {item.stats && item.stats.removed > 0 && (
                          <span style={{
-                           background: 'rgba(18, 18, 18, 0.15)', color: '#f44336',
-                           fontWeight: 700, fontSize: 'var(--font-xxs)', padding: '1px 5px', borderRadius: 3,
-                           letterSpacing: 0.3,
+                            background: 'rgba(18, 18, 18, 0.15)', color: '#f44336',
+                            fontWeight: 700, fontSize: 'var(--font-sm)', padding: '2px 6px', borderRadius: 3,
+                            letterSpacing: 0.3,
                          }}>-{item.stats.removed}</span>
                        )}
                       {item.tokenCount !== undefined && <span style={{ color: '#444', fontSize: 'var(--font-xs)' }}>({item.tokenCount}t)</span>}
                       {item.status === 'pending' && (!item.stats || item.stats.added === 0) && <span className="thinking-shimmer" style={{ fontSize: 'var(--font-xs)', marginLeft: 2 }}>…</span>}
                     {item.status === 'error' && <span className="thinking-shimmer" style={{ color: '#f87171', fontSize: 'var(--font-sm)' }} title={item.error || ''}>⚠ {item.error}</span>}
                         <button onClick={e => { e.stopPropagation(); toggleCollapse(item.id) }}
-                          style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: '#666', fontSize: 'var(--font-sm)', padding: '2px 4px', marginLeft: 'auto', transform: collapsedItems.has(item.id) ? 'rotate(0deg)' : 'rotate(90deg)', transition: 'transform 0.15s' }}>
-                         ▶
-                       </button>
-                  </div>
-                  {!collapsedItems.has(item.id) && (<>
-                  {item.diffPreview && (
+                          style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: '#666', fontSize: 'var(--font-sm)', padding: '2px 4px', marginLeft: 'auto', transform: expandedItems.has(item.id) ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.15s', display: item.toolName === 'run_command' ? 'none' : 'inline-flex' }}>
+                          ▶
+                        </button>
+                   </div>
+                   {expandedItems.has(item.id) && (<>
+                  {item.iframeSrcDoc ? (
+                    <div style={{ marginTop: 4, borderTop: '1px solid #2a2a2a', paddingTop: 4 }}>
+                      <div style={{ border: '1px solid #444', borderRadius: 4, overflow: 'hidden', background: '#fff', height: 180 }}>
+                        <iframe srcDoc={item.iframeSrcDoc} sandbox="allow-scripts" style={{ width: '100%', height: '100%', border: 'none' }} />
+                      </div>
+                    </div>
+                  ) : item.diffPreview ? (
                     <div style={{ marginTop: 4, borderTop: '1px solid #2a2a2a', maxHeight: 200, overflow: 'auto' }}>
                       <ColoredDiff diffContent={item.diffPreview} />
                       <button onClick={() => setDiffViewerContent(item.diffPreview ?? null)}
@@ -2228,19 +2290,30 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
                         View Full Diff
                       </button>
                     </div>
-                  )}
+                  ) : undefined}
 
-                  {!item.diffPreview && item.toolName === 'run_command' && !!item.content && (
+                  {!item.iframeSrcDoc && !item.diffPreview && item.toolName === 'run_command' && !!item.content && (
                     <div style={{ marginTop: 4, borderTop: '1px solid #2a2a2a' }}>
                       <ToolResultSummary toolName="run_command" content={String(item.content)} />
                     </div>
                   )}
-                  {!item.diffPreview && item.toolName === 'read_file' && !!item.content && (
-                    <div style={{ marginTop: 4, borderTop: '1px solid #2a2a2a' }}>
-                      <ToolResultSummary toolName="read_file" content={String(item.content)} />
+                  {!item.iframeSrcDoc && !item.diffPreview && ['grep_search', 'glob_search', 'semantic_search', 'ls'].includes(item.toolName || '') && !!item.content && (
+                    <div style={{ marginTop: 4, borderTop: '1px solid #2a2a2a', maxHeight: 150, overflow: 'auto' }}>
+                      <pre style={{ margin: 0, whiteSpace: 'pre-wrap', color: '#ccc', fontSize: 'var(--font-sm)', fontFamily: 'Consolas, monospace' }}>{item.content}</pre>
                     </div>
                   )}
-                  {!item.diffPreview && item.content && (
+                  {!item.iframeSrcDoc && !item.diffPreview && item.toolName === 'read_file' && !!item.content && (
+                    <div style={{ marginTop: 4, borderTop: '1px solid #2a2a2a', paddingTop: 6 }}>
+                      <ToolResultSummary toolName="read_file" content={String(item.content)} />
+                      <pre style={{
+                        marginTop: 6, margin: '6px 0 0', padding: '10px 14px', background: '#1a1a1a',
+                        borderRadius: 6, maxHeight: 200, overflow: 'auto', fontSize: '12px',
+                        fontFamily: 'Consolas, monospace', border: '1px solid #2e2e2e', color: '#aaa',
+                        whiteSpace: 'pre'
+                      }}>{String(item.content)}</pre>
+                    </div>
+                  )}
+                  {!item.iframeSrcDoc && !item.diffPreview && item.content && (
                     item.path && /\.(png|jpg|jpeg|gif|webp|svg|bmp|ico)$/i.test(item.path) && (
                       <div style={{ marginTop: 4, borderTop: '1px solid #2a2a2a', paddingTop: 4 }}>
                         <img src={item.content.startsWith('data:') ? item.content : `data:image/${item.path.split('.').pop()?.toLowerCase() === 'svg' ? 'svg+xml' : item.path.split('.').pop()?.toLowerCase() || 'png'};base64,${item.content}`}
@@ -2249,22 +2322,16 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
                       </div>
                     )
                   )}
-                  {!item.diffPreview && item.path && /\.(mp3|wav|ogg|aac|flac)$/i.test(item.path) && item.content && (
+                  {!item.iframeSrcDoc && !item.diffPreview && item.path && /\.(mp3|wav|ogg|aac|flac)$/i.test(item.path) && item.content && (
                     <div style={{ marginTop: 4, borderTop: '1px solid #2a2a2a', paddingTop: 4 }}>
                       <audio controls style={{ width: '100%', height: 36 }}
                         src={item.content.startsWith('data:') ? item.content : `data:audio/${item.path.split('.').pop()?.toLowerCase()};base64,${item.content}`} />
                     </div>
                   )}
-                  {!item.diffPreview && item.previewContent && item.toolName !== 'run_command' && item.toolName !== 'read_file' && !item.iframeSrcDoc && !/\.(png|jpg|jpeg|gif|webp|svg|bmp|ico|mp3|wav|ogg|aac|flac)$/i.test(item.path || '') && (
+                  {!item.iframeSrcDoc && !item.diffPreview && item.previewContent && item.toolName !== 'run_command' && item.toolName !== 'read_file' && !/\.(png|jpg|jpeg|gif|webp|svg|bmp|ico|mp3|wav|ogg|aac|flac)$/i.test(item.path || '') && (
                     <pre style={{ margin: '4px 0 0', whiteSpace: 'pre-wrap', color: '#888', fontSize: 'var(--font-sm)', fontFamily: 'Consolas, monospace', lineHeight: 1.4, maxHeight: 200, overflow: 'auto' }}>{truncateHead(item.previewContent, { maxLines: 200 }).content}</pre>
                   )}
-                  {!item.diffPreview && item.iframeSrcDoc && (
-                    <div style={{ marginTop: 4, borderTop: '1px solid #2a2a2a', paddingTop: 4 }}>
-                      <div style={{ border: '1px solid #444', borderRadius: 4, overflow: 'hidden', background: '#fff', height: 180 }}>
-                        <iframe srcDoc={item.iframeSrcDoc} sandbox="allow-scripts" style={{ width: '100%', height: '100%', border: 'none' }} />
-                      </div>
-                    </div>
-                  )}
+                      {item.toolName !== 'read_file' && item.toolName !== 'run_command' && (
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 8px', marginTop: 4, borderTop: '1px solid #2a2a2a', paddingTop: 3, justifyContent: 'flex-end' }}>
                         <button onClick={() => handleSaveFileToPC(item.path || '', item.content)}
                           style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: '#888', fontSize: 'var(--font-sm)', padding: '2px 4px' }}
@@ -2281,6 +2348,7 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
                          style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: '#f44336', fontSize: 'var(--font-sm)', padding: '2px 4px' }}
                          title="Remove step">Delete</button>
                       </div>
+                      )}
                   </>)}
                     </div>
     </div>
@@ -2293,12 +2361,12 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
                     <div style={{ margin: '4px 8px', padding: '8px 10px', borderRadius: 6, fontSize: 'var(--font-md)', border: '1px solid #f44336', background: '#121212' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                         <button onClick={e => { e.stopPropagation(); toggleCollapse(item.id) }}
-                          style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: '#f87171', fontSize: 'var(--font-sm)', padding: 0, transform: collapsedItems.has(item.id) ? 'rotate(0deg)' : 'rotate(90deg)', transition: 'transform 0.15s' }}>
-                          ▶
-                        </button>
-                        <div style={{ color: '#f87171', fontWeight: 600, marginBottom: 4 }}>Error</div>
-                      </div>
-                      {!collapsedItems.has(item.id) && <div style={{ color: '#c0c0c6', whiteSpace: 'pre-wrap', fontSize: 'var(--font-md)', marginBottom: 8 }}>{item.content}</div>}
+                          style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: '#f87171', fontSize: 'var(--font-sm)', padding: 0, transform: expandedItems.has(item.id) ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.15s' }}>
+                           ▶
+                         </button>
+                         <div style={{ color: '#f87171', fontWeight: 600, marginBottom: 4 }}>Error</div>
+                       </div>
+                       {expandedItems.has(item.id) && <div style={{ color: '#c0c0c6', whiteSpace: 'pre-wrap', fontSize: 'var(--font-md)', marginBottom: 8 }}>{item.content}</div>}
                        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
                          <button onClick={() => { navigator.clipboard.writeText(item.content || ''); }}
                            style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: '#666', fontSize: 'var(--font-sm)', padding: '0 4px' }}>Copy</button>
@@ -2308,34 +2376,59 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
                              border: '1px solid #f44336', borderRadius: 4, background: '#2a1010', color: '#f87171',
                            }}>Stop</button>
                          ) : (
-                           <button onClick={handleContinueBuild} style={{
-                             padding: '3px 10px', fontSize: 'var(--font-sm)', cursor: 'pointer',
-                             border: '1px solid #444', borderRadius: 4, background: '#2a2a2a', color: '#e0e0e6',
-                           }}>{item.content?.includes('getBuildDirectory') ? 'Continue' : 'Retry'}</button>
+                           <div style={{ position: 'relative', display: 'flex', alignItems: 'center', gap: 4 }}>
+                             <button onClick={() => setShowModelPicker(true)}
+                               style={{ display: 'flex', alignItems: 'center', gap: 2, padding: '3px 6px', fontSize: 'var(--font-xs)', cursor: 'pointer', border: '1px solid #444', borderRadius: 4, background: '#121212', color: '#aaa' }}>
+                               <span style={{ maxWidth: 70, overflow: 'hidden', textOverflow: 'ellipsis' }}>{apiSettings.model.split('/').pop()}</span>
+                               <span style={{ fontSize: 'var(--font-xxs)' }}>▼</span>
+                             </button>
+                             {showModelPicker && (
+                               <>
+                                 <div onClick={() => setShowModelPicker(false)} style={{ position: 'fixed', inset: 0, zIndex: 999 }} />
+                                 <div style={{ position: 'absolute', bottom: '100%', left: 0, marginBottom: 4, background: '#121212', border: '1px solid #333', borderRadius: 8, maxHeight: 200, overflow: 'auto', zIndex: 1000, minWidth: 140 }}>
+                                   {apiSettings.availableModels.map(m => (
+                                     <div key={m} onClick={() => { setLocalModel(m); setShowModelPicker(false) }}
+                                       style={{ padding: '6px 10px', fontSize: 'var(--font-md)', cursor: 'pointer', color: m === apiSettings.model ? '#fff' : '#aaa', background: m === apiSettings.model ? '#333' : 'transparent', borderBottom: '1px solid #2a2a2a' }}
+                                       onMouseEnter={e => { if (m !== apiSettings.model) (e.currentTarget as HTMLElement).style.background = '#2a2a2a' }}
+                                       onMouseLeave={e => { if (m !== apiSettings.model) (e.currentTarget as HTMLElement).style.background = 'transparent' }}>
+                                       {m.split('/').pop()}
+                                     </div>
+                                   ))}
+                                 </div>
+                               </>
+                             )}
+                             <button onClick={handleContinueBuild} style={{
+                               padding: '3px 10px', fontSize: 'var(--font-sm)', cursor: 'pointer',
+                               border: '1px solid #444', borderRadius: 4, background: '#121212', color: '#e0e0e6',
+                             }}>{item.content?.includes('getBuildDirectory') ? 'Continue' : 'Retry'}</button>
+                           </div>
                          )}
                        </div>
                       </div>
                     ) : (
                       item.content && (
-                        <div style={{ margin: '4px 8px', padding: '8px 10px', borderRadius: 6, fontSize: 'var(--font-md)', lineHeight: 1.5, background: '#121212' }}>
-                           <MarkdownContent content={item.content} color="#c0c0c6" />
+                        <div style={{ margin: '6px 12px', padding: '4px 12px', fontSize: 'var(--font-md)', lineHeight: 1.6 }}>
+                           <MarkdownContent content={item.content} color="#ccc" />
                         </div>
                       )
                     )
                 ) : (
               <div dir={isRTL(item.content || '') ? 'rtl' : 'ltr'} style={{
-                      margin: '2px 8px', padding: '8px 10px', borderRadius: 6, fontSize: 'var(--font-md)', lineHeight: 1.5,
-                      border: '1px solid #333', background: '#121212', height: 'auto',
-                      width: 'fit-content', marginLeft: 'auto', textAlign: isRTL(item.content || '') ? 'right' as const : 'left' as const,
+                      margin: '6px 12px', padding: item.type === 'user' ? '12px 16px' : '4px 12px', borderRadius: 8, fontSize: 'var(--font-md)', lineHeight: 1.6,
+                      border: item.type === 'user' ? '1px solid #363636' : 'none',
+                      background: item.type === 'user' ? '#1e1e1e' : 'transparent', height: 'auto',
+                      width: 'fit-content', marginLeft: item.type === 'user' ? 'auto' : '12px', marginRight: item.type === 'user' ? '12px' : 'auto',
+                      textAlign: isRTL(item.content || '') ? 'right' as const : 'left' as const,
+                      boxShadow: item.type === 'user' ? '0 2px 8px rgba(0,0,0,0.2)' : 'none'
                     }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
-                        <button onClick={e => { e.stopPropagation(); toggleCollapse(item.id) }}
-                          style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: '#666', fontSize: 'var(--font-sm)', padding: 0, transform: collapsedItems.has(item.id) ? 'rotate(0deg)' : 'rotate(90deg)', transition: 'transform 0.15s' }}>
-                          ▶
-                        </button>
-                        <span style={{ color: '#888', fontSize: 'var(--font-sm)', fontWeight: 500 }}>{item.type === 'user' ? 'You' : 'Assistant'}</span>
-                      </div>
-                      {!collapsedItems.has(item.id) && (item.content || item.previewContent) && (<>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                         <button onClick={e => { e.stopPropagation(); toggleCollapse(item.id) }}
+                           style={{ border: 'none', background: 'transparent', cursor: 'pointer', color: '#666', fontSize: 'var(--font-sm)', padding: 0, transform: (item.type === 'user' ? !expandedItems.has(item.id) : expandedItems.has(item.id)) ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.15s' }}>
+                           ▶
+                         </button>
+                         <span style={{ color: item.type === 'user' ? '#999' : '#666', fontSize: 'var(--font-xs)', fontWeight: 600 }}>{item.type === 'user' ? 'You' : 'Assistant'}</span>
+                       </div>
+                       {(item.type === 'user' ? !expandedItems.has(item.id) : expandedItems.has(item.id)) && (item.content || item.previewContent) && (<>
                       {item.content?.startsWith('data:image/') ? (
                        <>
                           <img src={item.content} onClick={() => setFullImage(item.content)} style={{ maxWidth: '100%', maxHeight: 240, borderRadius: 4, display: 'block', cursor: 'pointer' }} />
@@ -2344,9 +2437,9 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
                          )}
                        </>
                      ) : item.type === 'user' ? (
-                       <div style={{ color: '#e0e0e6', whiteSpace: 'pre-wrap', fontSize: 'var(--font-md)', wordBreak: 'break-word' }}>{item.content}</div>
+                       <div style={{ color: '#e0e0e6', whiteSpace: 'pre-wrap', fontSize: 'var(--font-md)', wordBreak: 'break-word', fontFamily: 'system-ui, -apple-system, sans-serif' }}>{item.content}</div>
                      ) : (
-                      <MarkdownContent content={item.content || ''} color="#c0c0c6" />
+                      <MarkdownContent content={item.content || ''} color="#ccc" />
                     )}
                       {item.type === 'user' && (
                      <div style={{ display: 'flex', gap: 8, marginTop: 8, paddingTop: 6, borderTop: '1px solid #2a2a2a' }}>
@@ -2373,19 +2466,19 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
               WebkitBackgroundClip: 'text', backgroundClip: 'text',
               color: 'transparent', animation: 'shimmerBg 1.2s infinite linear',
             }}>
-              {isShellRunning ? `Shell${runningCommand ? ': ' + runningCommand : ''}` : 'Thinking'}
+              {currentAction ? ('Thinking (' + currentAction + ')') : (isShellRunning ? ('Shell' + (runningCommand ? ': ' + runningCommand : '')) : 'Thinking')}
             </span>
           </div>
         )}
          {isRunning && userScrolledUp && (
            <button onClick={() => { if (buildOutputRef.current) { buildOutputRef.current.scrollTop = buildOutputRef.current.scrollHeight; setUserScrolledUp(false) } }}
-             style={{ position: 'sticky', bottom: 8, left: '50%', transform: 'translateX(-50%)', padding: '4px 14px', fontSize: 'var(--font-sm)', color: '#ccc', background: '#2a2a2a', border: '1px solid #444', borderRadius: 12, cursor: 'pointer', zIndex: 10, boxShadow: '0 4px 12px rgba(0,0,0,0.4)' }}>
+              style={{ position: 'sticky', bottom: 4, left: '50%', transform: 'translateX(calc(-50% - 10px))', padding: '4px 14px', fontSize: 'var(--font-sm)', color: '#ccc', background: '#121212', border: '1px solid #444', borderRadius: 12, cursor: 'pointer', zIndex: 10, boxShadow: '0 4px 12px rgba(0,0,0,0.4)' }}>
              ↓ Scroll to bottom
            </button>
          )}
          {!isRunning && userScrolledUp && timeline.length > 0 && (
            <button onClick={() => { if (buildOutputRef.current) { buildOutputRef.current.scrollTop = buildOutputRef.current.scrollHeight; setUserScrolledUp(false) } }}
-             style={{ position: 'sticky', bottom: 8, left: '50%', transform: 'translateX(-50%)', padding: '4px 14px', fontSize: 'var(--font-sm)', color: '#ccc', background: '#2a2a2a', border: '1px solid #444', borderRadius: 12, cursor: 'pointer', zIndex: 10, boxShadow: '0 4px 12px rgba(0,0,0,0.4)' }}>
+              style={{ position: 'sticky', bottom: 4, left: '50%', transform: 'translateX(calc(-50% - 10px))', padding: '4px 14px', fontSize: 'var(--font-sm)', color: '#ccc', background: '#121212', border: '1px solid #444', borderRadius: 12, cursor: 'pointer', zIndex: 10, boxShadow: '0 4px 12px rgba(0,0,0,0.4)' }}>
              ↓ Scroll to bottom
            </button>
          )}
@@ -2393,11 +2486,11 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
         </>)}
       </div>
 
-      <style>{`.sd{display:flex;align-items:center;justify-content:center;width:18px;height:18px;cursor:pointer;pointer-events:auto}.sd::after{content:'';display:block;width:6px;height:2px;border-radius:2px;background:var(--sd-bg,#aaa);transition:all .2s ease}.sd:hover::after{width:14px;height:3px;background:#fff}.sd[data-has]{--sd-bg:#22c55e}.sd[data-active]::after{width:10px;height:3px;background:var(--sd-bg,#fff)}*{scrollbar-width:thin;scrollbar-color:#444 transparent}*::-webkit-scrollbar{width:6px;height:6px}*::-webkit-scrollbar-track{background:transparent}*::-webkit-scrollbar-thumb{background:#444;border-radius:3px}*::-webkit-scrollbar-thumb:hover{background:#555}.info-modal{width:380px;max-width:90vw;background:#121212;border:1px solid #2a2a2a;border-radius:12px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.6)}@keyframes shimmerBg{0%{background-position:200% 0}100%{background-position:-200% 0}}`}</style>
+      <style>{`.sd{display:flex;align-items:center;justify-content:center;width:18px;height:18px;cursor:pointer;pointer-events:auto}.sd::after{content:'';display:block;width:6px;height:2px;border-radius:2px;background:var(--sd-bg,#aaa);transition:all .2s ease}.sd:hover::after{width:14px;height:3px;background:#fff}.sd[data-has]{--sd-bg:#22c55e}.sd[data-active]::after{width:10px;height:3px;background:var(--sd-bg,#fff)}*{scrollbar-width:thin;scrollbar-color:#444 transparent}*::-webkit-scrollbar{width:6px;height:6px}*::-webkit-scrollbar-track{background:transparent}*::-webkit-scrollbar-thumb{background:#444;border-radius:3px}*::-webkit-scrollbar-thumb:hover{background:#555}.info-modal{width:380px;max-width:90vw;background:#121212;border:1px solid #2a2a2a;border-radius:12px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.6)}@keyframes shimmerBg{0%{background-position:200% 0}100%{background-position:-200% 0}}.import-overlay{position:fixed;inset:0;z-index:50000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.5)}`}</style>
       {/* Scroll indicators — user messages only */}
       {userTimeline.length > 1 && (
         <div style={{
-          position: 'absolute', right: 2, top: '50%', transform: 'translateY(-50%)',
+          position: 'absolute', right: 7, top: '50%', transform: 'translateY(-50%)',
           display: 'flex', flexDirection: 'column', gap: 4,
           padding: '6px 2px', pointerEvents: 'none', zIndex: 15,
         }}>
@@ -2427,6 +2520,31 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
         </div>
       )}
 
+      {pendingPermission && (
+        <div style={{
+          margin: '0 8px', padding: '8px 12px', fontSize: 'var(--font-md)',
+          background: '#121212', borderRadius: 6, flexShrink: 0,
+        }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <span style={{
+              display: 'inline-block', fontWeight: 'bold',
+              backgroundImage: 'linear-gradient(90deg, #555, #fff, #555)',
+              backgroundSize: '200% 100%', backgroundRepeat: 'no-repeat',
+              WebkitBackgroundClip: 'text', backgroundClip: 'text',
+              color: 'transparent', animation: 'shimmerBg 1.2s infinite linear',
+              fontFamily: 'monospace', fontSize: 'var(--font-sm)',
+            }}>Tool Permission: {pendingPermission.action}: {pendingPermission.resources.join(', ')}</span>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
+              <button onClick={() => { permissionReply({ requestID: pendingPermission.id, reply: 'reject' }); setPendingPermission(null) }}
+                style={{ border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 'var(--font-sm)', padding: '0 4px', color: '#999' }}>Reject</button>
+              <button onClick={() => { permissionReply({ requestID: pendingPermission.id, reply: 'always' }); setPendingPermission(null) }}
+                style={{ border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 'var(--font-sm)', padding: '0 4px', color: '#999' }}>Always</button>
+              <button onClick={() => { permissionReply({ requestID: pendingPermission.id, reply: 'allow' }); setPendingPermission(null) }}
+                style={{ border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 'var(--font-sm)', padding: '0 4px', color: '#999' }}>Allow</button>
+            </div>
+          </div>
+        </div>
+      )}
       {confirmingCmd && (
         <div style={{
           margin: '0 8px', padding: '8px 12px', fontSize: 'var(--font-md)',
@@ -2457,7 +2575,7 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
 
         <div style={{
           padding: '8px 10px', borderTop: '1px solid #2a2a2a', background: '#121212', flexShrink: 0,
-          maxWidth: 800, margin: '0 auto', width: '100%',
+          width: '100%',
         }}>
           {buildWorkDir && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
@@ -2485,110 +2603,84 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
                   Drop file here
                 </div>
               )}
-               <>
-                 <input ref={fileInputRef} type="file" accept="image/*,.pdf,.txt" style={{ display: 'none' }}
-                   onChange={handleFileSelect} />
-                 <button onClick={() => fileInputRef.current?.click()}
-                   style={{
-                     position: 'absolute', left: 4, bottom: 8,
-                     width: 24, height: 24, borderRadius: 6, border: 'none',
-                     background: 'transparent', color: '#555', cursor: 'pointer',
-                     display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1,
-                   }}
-                   title="Attach file">
-                   <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
-                 </button>
-               </>
-               <button onClick={handleClear}
-                 style={{
-                   position: 'absolute', left: 28, bottom: 8,
-                   width: 24, height: 24, borderRadius: 6, border: 'none',
-                   background: 'transparent', color: '#555', cursor: 'pointer',
-                   display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1,
-                 }}
-                 title="Clear chat">
-                 <SvgIcon name="clear" size={12} />
-               </button>
-               <button onClick={() => setShowSettings(true)}
-                 style={{
-                   position: 'absolute', left: 54, bottom: 8,
-                   width: 24, height: 24, borderRadius: 6, border: 'none',
-                   background: 'transparent', color: '#555', cursor: 'pointer',
-                   display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1,
-                 }}
-                 title="API Settings">
-                 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-               </button>
-               {apiSettings.connected && apiSettings.availableModels && apiSettings.availableModels.length > 0 && (
-                 <div style={{ position: 'absolute', left: 80, bottom: 8 }}>
-                   <button onClick={() => setShowModelPicker(p => !p)}
-                     style={{
-                       height: 24, borderRadius: 6, border: '1px solid #333',
-                       background: '#121212', color: '#aaa', cursor: 'pointer',
-                       display: 'flex', alignItems: 'center', gap: 4, padding: '0 6px',
-                       fontSize: 'var(--font-sm)', fontFamily: 'inherit', whiteSpace: 'nowrap',
-                     }}>
-                     <span style={{ maxWidth: 70, overflow: 'hidden', textOverflow: 'ellipsis' }}>{apiSettings.model.split('/').pop()}</span>
-                     <span style={{ fontSize: 'var(--font-xxs)' }}>▼</span>
-                   </button>
-                   {showModelPicker && (
-                     <>
-                       <div onClick={() => setShowModelPicker(false)}
-                         style={{ position: 'fixed', inset: 0, zIndex: 999 }} />
-                       <div style={{
-                         position: 'absolute', bottom: '100%', left: 0, marginBottom: 4,
-                         background: '#1a1a1a', border: '1px solid #333', borderRadius: 8,
-                         maxHeight: 200, overflow: 'auto', zIndex: 1000, minWidth: 140,
-                       }}>
-                         {apiSettings.availableModels.map(m => (
-                           <div key={m} onClick={() => { setApiModel(m); setShowModelPicker(false) }}
-                             style={{
-                               padding: '6px 10px', fontSize: 'var(--font-md)', cursor: 'pointer', color: m === apiSettings.model ? '#fff' : '#aaa',
-                               background: m === apiSettings.model ? '#333' : 'transparent',
-                               borderBottom: '1px solid #2a2a2a',
-                             }}
-                             onMouseEnter={e => { if (m !== apiSettings.model) (e.currentTarget as HTMLElement).style.background = '#2a2a2a' }}
-                             onMouseLeave={e => { if (m !== apiSettings.model) (e.currentTarget as HTMLElement).style.background = 'transparent' }}>
-                             {m}
-                           </div>
-                         ))}
-                       </div>
-                     </>
-                   )}
+               <input ref={fileInputRef} type="file" accept="image/*,.pdf,.txt" style={{ display: 'none' }} onChange={handleFileSelect} />
+               {userPrompts.length > 0 && (
+                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 6 }}>
+                   {userPrompts.map((p, i) => (
+                     <button key={i} onClick={() => { setInput(p); textareaRef.current?.focus() }}
+                       style={{ fontSize: 'var(--font-xxs)', padding: '3px 8px', borderRadius: 4, border: '1px solid #333', background: '#121212', color: '#888', cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis' }}
+                       title={p}>{p}</button>
+                   ))}
                  </div>
-                )}
-                {userPrompts.length > 0 && (
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 6 }}>
-                    {userPrompts.map((p, i) => (
-                      <button key={i} onClick={() => {
-                        setInput(p)
-                        textareaRef.current?.focus()
-                      }}
-                        style={{
-                          fontSize: 'var(--font-xxs)', padding: '3px 8px', borderRadius: 4,
-                          border: '1px solid #333', background: '#1a1a1a', color: '#888',
-                          cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap',
-                          maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis',
-                        }}
-                        title={p}>
-                        {p}
-                      </button>
-                    ))}
-                  </div>
-                )}
-               <textarea ref={textareaRef} value={input}
-                 onChange={e => setInput(e.target.value)}
+               )}
+                                <div style={{ flex: 1, width: '100%', background: '#121212', border: '1px solid #333', borderRadius: 10, display: 'flex', flexDirection: 'column', padding: '6px 8px 36px 8px', position: 'relative' }}>
+                <textarea ref={textareaRef} value={input} onChange={e => setInput(e.target.value)}
                  onKeyDown={handleKeyDown}
                  onPaste={handlePaste}
                  rows={1}
                  dir={isRTL(input) ? 'rtl' : 'ltr'}
-                 placeholder={buildWorkDir ? 'Describe what to build in ' + buildWorkDir.split(/[\\/]/).pop() + '…' : 'Ask anything... '}
-                 style={{
-                   flex: 1, width: '100%', background: '#121212', border: '1px solid #333', borderRadius: 10, color: '#e0e0e6',
-                    fontSize: 'var(--font-md)', padding: '10px 42px 10px 20px', minHeight: 110, outline: 'none', resize: 'none', fontFamily: 'inherit',
+                 placeholder={buildWorkDir ? 'Describe what to build in ' + buildWorkDir.split(/[\\\/]/).pop() + '...' : 'Ask anything...'}
+                  style={{
+                    width: '100%', background: 'transparent', border: 'none', color: '#e0e0e6',
+                    fontSize: 'var(--font-md)', padding: 0, minHeight: 74, outline: 'none', resize: 'none', fontFamily: 'inherit',
                     lineHeight: 1.9, boxSizing: 'border-box', textAlign: isRTL(input) ? 'right' as const : 'left' as const,
-                 }}
-               />
+                  }} />
+               {/* Buttons row � absolute at bottom of textarea */}
+               <div style={{ position: 'absolute', left: 4, bottom: 8, display: 'flex', alignItems: 'center', gap: 4, zIndex: 1 }}>
+                 <button onClick={() => fileInputRef.current?.click()}
+                   style={{ width: 24, height: 24, borderRadius: 6, border: 'none', background: 'transparent', color: '#555', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                   title="Attach file">
+                   <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+                 </button>
+                 <button onClick={handleClear}
+                   style={{ width: 24, height: 24, borderRadius: 6, border: 'none', background: 'transparent', color: '#555', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                   title="Clear chat">
+                   <SvgIcon name="clear" size={12} />
+                 </button>
+                 <button onClick={() => setShowSettings(true)}
+                   style={{ width: 24, height: 24, borderRadius: 6, border: 'none', background: 'transparent', color: '#555', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                   title="API Settings">
+                   <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                 </button>
+                 {apiSettings.connected && apiSettings.availableModels && apiSettings.availableModels.length > 0 && (
+                   <div style={{ position: 'relative' }}>
+                     <button onClick={() => setShowModelPicker(p => !p)}
+                       style={{ height: 24, borderRadius: 6, border: '1px solid #333', background: '#121212', color: '#aaa', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, padding: '0 6px', fontSize: 'var(--font-sm)', fontFamily: 'inherit', whiteSpace: 'nowrap' }}>
+                       <span style={{ maxWidth: 70, overflow: 'hidden', textOverflow: 'ellipsis' }}>{apiSettings.model.split('/').pop()}</span>
+                       <span style={{ fontSize: 'var(--font-xxs)' }}>&#x25BC;</span>
+                     </button>
+                     {showModelPicker && (
+                       <>
+                         <div onClick={() => setShowModelPicker(false)} style={{ position: 'fixed', inset: 0, zIndex: 999 }} />
+                         <div style={{ position: 'absolute', bottom: '100%', left: 0, marginBottom: 4, background: '#121212', border: '1px solid #333', borderRadius: 8, maxHeight: 200, overflow: 'auto', zIndex: 1000, minWidth: 140 }}>
+                           {apiSettings.availableModels.map(m => (
+                             <div key={m} onClick={() => { setLocalModel(m); setShowModelPicker(false) }}
+                               style={{ padding: '6px 10px', fontSize: 'var(--font-md)', cursor: 'pointer', color: m === apiSettings.model ? '#fff' : '#aaa', background: m === apiSettings.model ? '#333' : 'transparent', borderBottom: '1px solid #2a2a2a' }}
+                               onMouseEnter={e => { if (m !== apiSettings.model) (e.currentTarget as HTMLElement).style.background = '#2a2a2a' }}
+                               onMouseLeave={e => { if (m !== apiSettings.model) (e.currentTarget as HTMLElement).style.background = 'transparent' }}>
+                               {m.split('/').pop()}
+                             </div>
+                           ))}
+                         </div>
+                       </>
+                     )}
+                   </div>
+                 )}
+                   {apiSettings.connected && (
+                     <button onClick={() => {
+                       const cycleMap: Record<string, string> = { 'default': 'low', 'low': 'high', 'high': 'default' };
+                        const currentEffort = localEffort ?? (globalApiSettings.thinkingEffort || 'default');
+                       const nextEffort = cycleMap[currentEffort] || 'default';
+                       setLocalEffort(nextEffort);
+                     }}
+                       style={{ height: 24, borderRadius: 6, border: '1px solid #333', background: '#121212', color: '#aaa', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4, padding: '0 8px', fontSize: 'var(--font-xs)', fontFamily: 'inherit', whiteSpace: 'nowrap', userSelect: 'none' }}
+                       title="Cycle Thinking Effort">
+                       <span>Effort: </span>
+                       <span style={{ fontWeight: 'bold', color: (localEffort ?? globalApiSettings.thinkingEffort) === 'high' ? '#4caf50' : ((localEffort ?? globalApiSettings.thinkingEffort) === 'low' ? '#ff9800' : '#888') }}>{((localEffort ?? globalApiSettings.thinkingEffort) || 'default').toUpperCase()}</span>
+                     </button>
+                   )}
+               </div>
+                </div>
               {attachmentsRef.current.size > 0 && attachVersion >= 0 && (
                 <div style={{
                   position: 'absolute', bottom: '100%', left: 4, marginBottom: 4,

@@ -1,5 +1,4 @@
 import { ColoredDiff } from './ColoredDiff'
-import { ChecklistDisplay } from './ChecklistDisplay'
 
 const STYLES = {
   arrow: { color: '#666', display: 'flex' as const },
@@ -63,7 +62,6 @@ export function ToolResultSummary({ toolName, content }: ToolResultSummaryProps)
     const isStderr = content.startsWith('Stderr:')
     const actualOutput = isStderr ? content.slice(7).trim() : content
     const outputLines = actualOutput.split('\n')
-    const firstLines = outputLines.slice(0, MAX_BASH_OUTPUT_LINES).join('\n')
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
         <div style={{ display: 'flex', gap: 4 }}>
@@ -73,13 +71,9 @@ export function ToolResultSummary({ toolName, content }: ToolResultSummaryProps)
         <pre style={{
           margin: 0, paddingLeft: 16, fontFamily: 'Consolas, monospace',
           fontSize: 'var(--font-sm)', color: isStderr ? '#f87171' : '#ccc',
-          whiteSpace: 'pre-wrap', maxHeight: 80, overflow: 'auto',
-        }}>{firstLines.trimEnd()}</pre>
-        {outputLines.length > MAX_BASH_OUTPUT_LINES && (
-          <div style={{ paddingLeft: 16, color: '#888' }}>
-            ... +{outputLines.length - MAX_BASH_OUTPUT_LINES} lines
-          </div>
-        )}
+          whiteSpace: 'pre-wrap', maxHeight: 200, overflow: 'auto',
+          background: '#0a0a0f', borderRadius: 4, padding: '6px 10px', border: '1px solid #1a1a24'
+        }}>{actualOutput.trim()}</pre>
       </div>
     )
   }

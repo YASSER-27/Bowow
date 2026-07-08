@@ -1,3 +1,5 @@
+import { sanitizeSurrogates } from './sanitizeUnicode'
+
 export function detectLineEnding(content: string): "\r\n" | "\n" {
   const crlfIdx = content.indexOf("\r\n");
   const lfIdx = content.indexOf("\n");
@@ -7,7 +9,7 @@ export function detectLineEnding(content: string): "\r\n" | "\n" {
 }
 
 export function normalizeToLF(text: string): string {
-  return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  return sanitizeSurrogates(text).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 
 export function restoreLineEndings(text: string, ending: "\r\n" | "\n"): string {

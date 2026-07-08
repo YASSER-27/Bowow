@@ -68,7 +68,7 @@ interface ColoredDiffProps {
   maxLines?: number
 }
 
-export function ColoredDiff({ diffContent, maxLines = 16 }: ColoredDiffProps) {
+export function ColoredDiff({ diffContent, maxLines = 50 }: ColoredDiffProps) {
   const parsedLines = parseDiffLines(diffContent)
 
   if (parsedLines.length === 0) {
