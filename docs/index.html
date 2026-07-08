@@ -1,410 +1,717 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>page bowow</title>
-    <style>
-        :root {
-            --bg-color: #121212;
-            --glass-grad-1: #000000;
-            --glass-grad-2: #222222;
-            --accent-color: #ffffff;
-            --text-color: #e0e0e0;
-            --matrix-color: rgba(255, 255, 255, 0.05);
-        }
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BOWOW - open source coding agent</title>
+<style>
+  :root{
+    --bg:#111111;
+    --bg-2:#121212;
+    --panel:#1a1a1a;
+    --panel-2:#161616;
+    --line:rgba(255,255,255,.08);
+    --line-strong:rgba(255,255,255,.16);
+    --ink:#f2f2f2;
+    --muted:#999999;
+    --muted-2:#888888;
+    --matrix:#999999;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{
+    background:var(--bg);
+    color:var(--muted);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Arial,sans-serif;
+    line-height:1.6;
+    overflow-x:hidden;
+  }
 
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+  /* ---------- matrix background ---------- */
+  .matrix-bg{
+    position:fixed;inset:0;z-index:-2;
+    overflow:hidden;pointer-events:none;
+    font-family:"SF Mono",Consolas,monospace;
+    font-size:13px;
+    color:var(--matrix);
+    opacity:.14;
+    user-select:none;
+  }
+  .matrix-column{
+    position:absolute;top:-100%;width:22px;
+    text-align:center;white-space:nowrap;
+    animation:fall linear infinite;
+  }
+  @keyframes fall{
+    0%{transform:translateY(0);}
+    100%{transform:translateY(200vh);}
+  }
+  .bg-glow{
+    position:fixed;inset:0;z-index:-1;
+    background:
+      radial-gradient(ellipse 900px 500px at 15% -5%, rgba(255,255,255,.05), transparent 60%),
+      radial-gradient(ellipse 900px 500px at 90% 10%, rgba(255,255,255,.04), transparent 60%),
+      var(--bg-2);
+  }
 
-        body {
-            background-color: var(--bg-color);
-            color: var(--text-color);
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            overflow-x: hidden;
-            line-height: 1.6;
-        }
+  /* ---------- nav ---------- */
+  nav{
+    position:sticky;top:0;z-index:200;
+    display:flex;align-items:center;justify-content:space-between;
+    padding:16px 5%;
+    background:rgba(17,17,17,.75);
+    backdrop-filter:blur(14px);
+    border-bottom:1px solid var(--line);
+  }
+  .brand{display:flex;align-items:center;gap:12px;}
+  .brand-mark{
+    width:34px;height:34px;border-radius:9px;
+    background:var(--panel);
+    border:1px solid var(--line-strong);
+    display:flex;align-items:center;justify-content:center;
+    font-weight:800;color:var(--ink);font-size:15px;
+    letter-spacing:-0.5px;
+    object-fit:cover;
+  }
+  .brand h1{
+    font-size:1.05rem;letter-spacing:2px;font-weight:800;
+    color:var(--ink);text-transform:uppercase;
+  }
+  .nav-mid{
+    display:flex;align-items:center;gap:6px;
+  }
+  .nav-pill{
+    appearance:none;border:1px solid var(--line);
+    background:var(--panel-2);
+    color:var(--muted);
+    padding:9px 18px;border-radius:999px;
+    font-size:.88rem;font-family:inherit;font-weight:500;
+    cursor:pointer;transition:.2s ease;letter-spacing:.2px;
+  }
+  .nav-pill:hover{
+    color:var(--ink);border-color:var(--line-strong);
+    background:#1f1f1f;
+  }
+  .nav-right{display:flex;align-items:center;gap:10px;}
+  .btn-ghost{
+    border:1px solid var(--line);background:var(--panel-2);
+    color:var(--muted);padding:9px 16px;border-radius:999px;
+    font-size:.85rem;text-decoration:none;transition:.2s;
+    display:flex;align-items:center;gap:8px;font-weight:500;
+  }
+  .btn-ghost:hover{color:var(--ink);border-color:var(--line-strong);}
+  .btn-star{
+    background:var(--panel);color:var(--ink);
+  }
 
-        /* Matrix Background */
-        .matrix-bg {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            z-index: -2;
-            overflow: hidden;
-            pointer-events: none;
-            font-family: monospace;
-            font-size: 14px;
-            color: var(--matrix-color);
-            user-select: none;
-        }
+  /* ---------- hero ---------- */
+  .hero{
+    max-width:1000px;margin:0 auto;
+    padding:100px 24px 40px;
+    text-align:center;
+  }
+  .eyebrow{
+    display:inline-flex;align-items:center;gap:8px;
+    font-size:.8rem;color:var(--muted-2);
+    letter-spacing:1.5px;text-transform:uppercase;
+    margin-bottom:22px;
+  }
+  .eyebrow::before{content:'◆';color:var(--muted-2);font-size:.7rem;}
+  .hero h2{
+    font-size:clamp(2.6rem, 7vw, 5rem);
+    font-weight:800;color:var(--ink);
+    letter-spacing:-2px;line-height:1.02;
+  }
+  .hero h2 .dim{color:var(--muted-2);}
+  .hero p.sub{
+    max-width:620px;margin:26px auto 0;
+    font-size:1.05rem;color:var(--muted);
+    line-height:1.7;
+  }
+  .hero-actions{
+    margin-top:38px;
+    display:flex;gap:14px;justify-content:center;flex-wrap:wrap;
+  }
+  .btn-primary{
+    background:var(--ink);color:#111;
+    padding:14px 30px;border-radius:10px;
+    text-decoration:none;font-weight:700;font-size:.95rem;
+    letter-spacing:.2px;transition:.2s;
+    box-shadow:0 0 0 rgba(255,255,255,0);
+  }
+  .btn-primary:hover{
+    transform:translateY(-2px);
+    box-shadow:0 8px 30px rgba(255,255,255,.12);
+  }
+  .btn-secondary{
+    border:1px solid var(--line-strong);
+    color:var(--ink);background:transparent;
+    padding:14px 26px;border-radius:10px;
+    text-decoration:none;font-weight:600;font-size:.95rem;
+    transition:.2s;
+  }
+  .btn-secondary:hover{background:var(--panel-2);}
 
-        .matrix-column {
-            position: absolute;
-            top: -100%;
-            width: 20px;
-            text-align: center;
-            animation: matrix-fall linear infinite;
-        }
+  /* ---------- marquee features ---------- */
+  :root {
+    --bg-marquee: #1a1a1a;
+    --bg-card: #222222;
+    --accent-color: #ffffff;
+    --border-radius: 14px;
+    --card-height: 110px;
+  }
+  .marquee-wrapper { 
+    background: linear-gradient(180deg, var(--bg) 0%, var(--bg-marquee) 20%, var(--bg-marquee) 80%, var(--bg) 100%); 
+    padding: 80px 0; 
+    overflow: hidden; 
+    position: relative; 
+  }
+  .marquee-wrapper .section-head { color: #ffffff; position: relative; z-index: 2; }
+  .marquee-wrapper .section-head .tag { color: var(--muted-2); }
+  .marquee-wrapper .section-head h3 { color: #ffffff; }
+  .marquee-wrapper .section-head p { color: #d1d1d1; }
+  .marquee-section { display: flex; flex-direction: column; gap: 25px; width: 100%; mask-image: linear-gradient(to right, transparent, black 10%, black 90%, transparent); -webkit-mask-image: linear-gradient(to right, transparent, black 10%, black 90%, transparent); position: relative; z-index: 2; }
+  .marquee-row { display: flex; width: max-content; }
+  .marquee-content { display: flex; gap: 20px; padding-right: 20px; }
+  .scroll-left { animation: scrollLeft 40s linear infinite; }
+  .scroll-right { animation: scrollRight 55s linear infinite; }
+  @keyframes scrollLeft { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }
+  @keyframes scrollRight { 0% { transform: translateX(-50%); } 100% { transform: translateX(0); } }
+  .music-card { 
+    display: flex; 
+    background-color: var(--bg-card); 
+    border: 1px solid var(--line-strong); 
+    border-radius: var(--border-radius); 
+    height: var(--card-height); 
+    width: 300px; 
+    overflow: hidden; 
+    flex-shrink: 0; 
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3); 
+    transition: transform 0.3s, border-color 0.3s, background-color 0.3s, box-shadow 0.3s; 
+    backdrop-filter: blur(12px); 
+  }
+  .music-card:hover { 
+    transform: scale(1.05) translateY(-5px); 
+    border-color: var(--ink); 
+    background-color: #2a2a2a;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  }
+  .card-cover { 
+    width: var(--card-height); 
+    height: var(--card-height); 
+    object-fit: cover; 
+    display: flex; 
+    align-items: center; 
+    justify-content: center; 
+    font-size: 2rem; 
+    background: rgba(0,0,0,0.2); 
+    color: var(--muted); 
+    border-right: 1px solid var(--line); 
+  }
+  .card-info { padding: 14px; display: flex; flex-direction: column; justify-content: space-between; flex: 1; }
+  .card-title { font-size: 16px; font-weight: 800; margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--ink); }
+  .card-subtitle { font-size: 12px; color: var(--muted); font-weight: 500; }
+  .card-stats { display: flex; gap: 12px; margin-top: auto; align-items: center; }
+  .stat-item { display: flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 700; color: var(--muted); background: rgba(0,0,0,0.2); padding: 4px 8px; border-radius: 20px; }
+  .stat-icon { fill: currentColor; width: 10px; height: 10px; }
+  .stat-item:first-child .stat-icon { fill: var(--ink); }
 
-        @keyframes matrix-fall {
-            0% { transform: translateY(0); }
-            100% { transform: translateY(200vh); }
-        }
+  /* ---------- demo / preview frame ---------- */
+  .demo-frame{
+    max-width:980px;margin:60px auto 0;
+    border-radius:18px;overflow:hidden;
+    border:1px solid var(--line-strong);
+    background:var(--panel-2);
+    box-shadow:0 30px 80px rgba(0,0,0,.6);
+  }
+  .demo-bar{
+    display:flex;align-items:center;gap:8px;
+    padding:14px 18px;border-bottom:1px solid var(--line);
+    background:var(--panel);
+  }
+  .demo-dot{width:11px;height:11px;border-radius:50%;background:#333;border:1px solid var(--line-strong);}
+  .demo-frame img{
+    width:100%;display:block;
+  }
 
-        /* Glass Gradient Background */
-        .glass-overlay {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            z-index: -1;
-            background: linear-gradient(135deg, var(--glass-grad-1), var(--glass-grad-2));
-            opacity: 0.8;
-            animation: blur-pulse 8s ease-in-out infinite alternate;
-        }
+  /* ---------- section shell ---------- */
+  .section{max-width:1100px;margin:0 auto;padding:110px 24px 0;}
+  .section-head{text-align:center;margin-bottom:56px;}
+  .section-head .tag{
+    font-size:.78rem;letter-spacing:2px;text-transform:uppercase;
+    color:var(--muted-2);margin-bottom:14px;display:block;
+  }
+  .section-head h3{
+    font-size:clamp(1.9rem,4vw,2.6rem);
+    color:var(--ink);font-weight:800;letter-spacing:-1px;
+  }
+  .section-head p{
+    max-width:520px;margin:16px auto 0;color:var(--muted);
+    font-size:1rem;
+  }
 
-        @keyframes blur-pulse {
-            0% { backdrop-filter: blur(5px); }
-            100% { backdrop-filter: blur(15px); }
-        }
+  /* ---------- feature grid ---------- */
+  .grid{
+    display:grid;
+    grid-template-columns:repeat(auto-fill, minmax(230px,1fr));
+    gap:16px;
+  }
+  .tile{
+    background:var(--panel-2);
+    border:1px solid var(--line);
+    border-radius:14px;
+    padding:22px 20px;
+    transition:.2s ease;
+  }
+  .tile:hover{
+    border-color:var(--line-strong);
+    background:var(--panel);
+    transform:translateY(-3px);
+  }
+  .tile-icon{
+    width:38px;height:38px;border-radius:10px;
+    background:var(--panel);border:1px solid var(--line-strong);
+    display:flex;align-items:center;justify-content:center;
+    font-size:1.05rem;margin-bottom:16px;color:var(--ink);
+  }
+  .tile h4{color:var(--ink);font-size:1rem;font-weight:700;margin-bottom:6px;letter-spacing:-.2px;}
+  .tile p{font-size:.88rem;color:var(--muted);line-height:1.55;}
 
-        /* Navigation */
-        nav {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 1rem 5%;
-            background: rgba(0, 0, 0, 0.6);
-            backdrop-filter: blur(10px);
-            position: sticky;
-            top: 0;
-            z-index: 100;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-        }
+  /* ---------- usage / steps ---------- */
+  .steps{
+    display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));
+    gap:24px;
+  }
+  .step{
+    padding:10px 0;position:relative;
+  }
+  .step .num{
+    font-size:.75rem;color:var(--accent-color);letter-spacing:1px;
+    font-weight:700;margin-bottom:8px;
+  }
+  .step h5{color:var(--ink);font-size:.98rem;margin-bottom:4px;font-weight:700;}
+  .step p{font-size:.86rem;color:var(--muted);}
 
-        .nav-brand {
-            display: flex;
-            align-items: center;
-            gap: 15px;
-        }
+  /* ---------- footer ---------- */
+  footer{
+    margin-top:130px;border-top:1px solid var(--line);
+    padding:56px 5% 34px;
+  }
+  .footer-grid{
+    max-width:1100px;margin:0 auto;
+    display:grid;grid-template-columns:1.4fr 1fr 1fr;gap:40px;
+  }
+  .footer-brand{display:flex;align-items:center;gap:10px;margin-bottom:14px;}
+  .footer-brand h4{color:var(--ink);letter-spacing:1px;font-size:.95rem;}
+  .footer-grid p{font-size:.88rem;max-width:320px;}
+  .footer-col h5{
+    color:var(--ink);font-size:.82rem;letter-spacing:1px;
+    text-transform:uppercase;margin-bottom:16px;
+  }
+  .footer-col a{
+    display:block;color:var(--muted);text-decoration:none;
+    font-size:.9rem;margin-bottom:10px;transition:.2s;
+  }
+  .footer-col a:hover{color:var(--ink);}
+  .footer-bottom{
+    max-width:1100px;margin:40px auto 0;
+    border-top:1px solid var(--line);
+    padding-top:22px;
+    display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px;
+    font-size:.82rem;color:var(--muted-2);
+  }
 
-        .nav-brand img {
-            height: 50px;
-            width: auto;
-        }
+  /* ---------- modal ---------- */
+  .modal-overlay{
+    display:none;position:fixed;inset:0;z-index:1000;
+    background:rgba(0,0,0,.7);backdrop-filter:blur(8px);
+    align-items:center;justify-content:center;padding:24px;
+  }
+  .modal-overlay.active{display:flex;}
+  .modal-box{
+    width:100%;max-width:640px;max-height:78vh;overflow-y:auto;
+    background:var(--panel-2);
+    border:1px solid var(--line-strong);
+    border-radius:16px;padding:36px;position:relative;
+    animation:pop .18s ease;
+  }
+  @keyframes pop{from{opacity:0;transform:scale(.97);}to{opacity:1;transform:scale(1);}}
+  .modal-close{
+    position:absolute;top:16px;right:18px;
+    background:var(--panel);border:1px solid var(--line);
+    color:var(--muted);width:32px;height:32px;border-radius:8px;
+    cursor:pointer;font-size:1.1rem;line-height:1;
+    display:flex;align-items:center;justify-content:center;
+  }
+  .modal-close:hover{color:var(--ink);border-color:var(--line-strong);}
+  .modal-box .tag{
+    font-size:.78rem;letter-spacing:2px;text-transform:uppercase;
+    color:var(--muted-2);margin-bottom:10px;display:block;
+  }
+  .modal-box h2{color:var(--ink);font-size:1.5rem;font-weight:800;margin-bottom:22px;letter-spacing:-.5px;}
+  .modal-list{list-style:none;}
+  .modal-list li{
+    padding:14px 0;border-bottom:1px solid var(--line);
+    display:flex;gap:12px;
+  }
+  .modal-list li:last-child{border-bottom:none;}
+  .modal-list .dot{color:var(--muted-2);flex-shrink:0;margin-top:2px;}
+  .modal-list strong{color:var(--ink);font-weight:700;}
+  .modal-list span{color:var(--muted);font-size:.92rem;}
 
-        .nav-brand h1 {
-            font-size: 2rem;
-            letter-spacing: 4px;
-            font-weight: 900;
-            color: #fff;
-            text-shadow: 0 0 10px rgba(255,255,255,0.3);
-        }
-
-        /* Hero Section (Thumbnail Large) */
-        .hero {
-            position: relative;
-            height: 80vh;
-            width: 100%;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            text-align: center;
-            background: url('./images/cat_talk.gif') no-repeat center center;
-            background-size: cover;
-            margin-bottom: 4rem;
-            box-shadow: inset 0 0 100px #000;
-        }
-
-        .hero::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: rgba(0, 0, 0, 0.4);
-        }
-
-        .hero-content {
-            position: relative;
-            z-index: 1;
-            padding: 20px;
-        }
-
-        .download-btn {
-            display: inline-block;
-            padding: 15px 40px;
-            background: #fff;
-            color: #000;
-            text-decoration: none;
-            font-weight: bold;
-            border-radius: 5px;
-            font-size: 1.2rem;
-            transition: all 0.3s ease;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-            box-shadow: 0 0 20px rgba(255,255,255,0.2);
-        }
-
-        .download-btn:hover {
-            background: #e0e0e0;
-            transform: translateY(-3px);
-            box-shadow: 0 5px 25px rgba(255,255,255,0.4);
-        }
-
-        /* Content Sections */
-        .container {
-            max-width: 1100px;
-            margin: 0 auto;
-            padding: 0 20px;
-        }
-
-        .section-title {
-            font-size: 2.5rem;
-            margin-bottom: 2rem;
-            text-align: center;
-            color: #fff;
-            border-bottom: 2px solid rgba(255,255,255,0.1);
-            padding-bottom: 10px;
-        }
-
-        .grid-cards {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 30px;
-            margin-bottom: 4rem;
-        }
-
-        .card {
-            background: rgba(255, 255, 255, 0.03);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 12px;
-            overflow: hidden;
-            transition: transform 0.3s ease;
-        }
-
-        .card:hover {
-            border-color: rgba(255, 255, 255, 0.3);
-        }
-
-        .card img {
-            width: 100%;
-            height: auto;
-            display: block;
-        }
-
-        .content-block {
-            background: rgba(0, 0, 0, 0.4);
-            padding: 40px;
-            border-radius: 15px;
-            margin-bottom: 4rem;
-            backdrop-filter: blur(5px);
-            border: 1px solid rgba(255, 255, 255, 0.05);
-        }
-
-        .content-block h3 {
-            color: #fff;
-            margin-bottom: 1.5rem;
-            font-size: 1.8rem;
-        }
-
-        .content-block ul {
-            list-style: none;
-        }
-
-        .content-block li {
-            margin-bottom: 12px;
-            padding-left: 25px;
-            position: relative;
-        }
-
-        .content-block li::before {
-            content: '▹';
-            position: absolute;
-            left: 0;
-            color: #888;
-        }
-
-        .feature-item strong {
-            color: #fff;
-        }
-
-        /* Big Thumbnail GIF */
-        .gif-container {
-            width: 100%;
-            max-width: 900px;
-            margin: 4rem auto;
-            border-radius: 15px;
-            overflow: hidden;
-            box-shadow: 0 0 50px rgba(0,0,0,0.5);
-            border: 1px solid rgba(255,255,255,0.1);
-        }
-
-        .gif-container img {
-            width: 100%;
-            display: block;
-        }
-
-        /* Footer */
-        footer {
-            background: rgba(0, 0, 0, 0.8);
-            padding: 4rem 5% 2rem;
-            text-align: center;
-            border-top: 1px solid rgba(255, 255, 255, 0.1);
-        }
-
-        .footer-content {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            gap: 20px;
-        }
-
-        .footer-logo {
-            height: 60px;
-            width: auto;
-        }
-
-        .footer-link {
-            color: #fff;
-            text-decoration: none;
-            font-size: 1.1rem;
-            opacity: 0.7;
-            transition: opacity 0.3s;
-        }
-
-        .footer-link:hover {
-            opacity: 1;
-        }
-
-        .year-tag {
-            margin-top: 20px;
-            font-size: 0.9rem;
-            color: rgba(255, 255, 255, 0.3);
-            letter-spacing: 2px;
-        }
-
-        /* Responsive adjustments */
-        @media (max-width: 768px) {
-            .hero { height: 60vh; }
-            .nav-brand h1 { font-size: 1.5rem; }
-            .section-title { font-size: 2rem; }
-        }
-    </style>
+  @media (max-width:768px){
+    .footer-grid{grid-template-columns:1fr;}
+    .nav-mid{display:none;}
+    .hero{padding:70px 20px 20px;}
+  }
+</style>
 </head>
 <body>
 
-    <div class="matrix-bg" id="matrix"></div>
-    <div class="glass-overlay"></div>
+<div class="matrix-bg" id="matrix"></div>
+<div class="bg-glow"></div>
 
-    <nav>
-        <div class="nav-brand">
-            <img src="./images/cat_view.png" alt="cat_view.png">
-            <h1>BOWOW</h1>
-        </div>
-    </nav>
+<nav>
+  <div class="brand">
+    <img src="./images/cat_view.png" class="brand-mark" alt="Bowow Logo">
+    <h1>Bowow</h1>
+  </div>
+  <div class="nav-mid">
+    <button class="nav-pill" onclick="openModal('modal-updates')">Updates &amp; Improvements</button>
+    <button class="nav-pill" onclick="openModal('modal-features')">Features</button>
+  </div>
+  <div class="nav-right">
+    <a class="btn-ghost" href="https://github.com/YASSER-27" target="_blank" rel="noopener">GitHub</a>
+    <a class="btn-ghost btn-star" href="https://github.com/YASSER-27/Bowow/releases" target="_blank" rel="noopener">Download</a>
+  </div>
+</nav>
 
-    <section class="hero">
-        <div class="hero-content">
-            <a href="https://github.com/YASSER-27/Bowow/releases" class="download-btn">Download Now</a>
-        </div>
-    </section>
+<section class="hero">
+  <div class="eyebrow">Open source coding agent</div>
+  <h2>BOW<span class="dim">OW</span></h2>
+  <p class="sub">A desktop coding agent that reads, writes, and diffs your project files directly on disk — connect any model, describe what to build, and let it run.</p>
+  <div class="hero-actions">
+    <a class="btn-primary" href="https://github.com/YASSER-27/Bowow/releases" target="_blank" rel="noopener">Download Now</a>
+    <a class="btn-secondary" href="https://github.com/YASSER-27" target="_blank" rel="noopener">View on GitHub</a>
+  </div>
 
-    <div class="container">
-        <section class="content-block">
-            <h2 class="section-title">Updates & Improvements</h2>
-            <ul>
-                <li><strong>Performance Optimization:</strong> Resolved performance lags; the application is now stable.</li>
-                <li><strong>New Settings Window:</strong> Introduced a dedicated Settings window with a significantly improved and cleaner user interface.</li>
-                <li><strong>RTL Language Support:</strong> Fixed Arabic text rendering issues; text now correctly aligns to the right.</li>
-                <li><strong>Refined UI:</strong> Removed borders from AI messages for a cleaner, modern, and elegant look.</li>
-                <li><strong>Easter Egg:</strong> Head over to Settings and click on the "Bowow" name to see a little surprise!</li>
-                <li><strong>Persistence:</strong> Chat sessions are now persistent. Your conversations are saved automatically.</li>
-            </ul>
-        </section>
-
-        <h2 class="section-title">Preview</h2>
-        <div class="grid-cards">
-            <div class="card">
-                <img src="./images/bowow_desktop.png" alt="bowow_desktop.png">
-            </div>
-            <div class="card">
-                <img src="./images/bowow_desktop2.png" alt="bowow_desktop2.png">
-            </div>
-        </div>
-
-        <section class="content-block">
-            <h3>Features</h3>
-            <ul>
-                <li class="feature-item"><strong>Multi-Model Support:</strong> Works with Gemini, OpenAI, OpenRouter, Ollama, and llama.cpp backends.</li>
-                <li class="feature-item"><strong>Split-Screen Mode:</strong> Toggle a 4-pane view (F10) to manage multiple build sessions simultaneously.</li>
-                <li class="feature-item"><strong>Live File Editing:</strong> The agent reads, writes, and diffs project files directly on disk.</li>
-                <li class="feature-item"><strong>Checkpoint System:</strong> Undo file changes with checkpoint-based rollback.</li>
-                <li class="feature-item"><strong>Context Management:</strong> Automatic conversation compaction and pruning.</li>
-                <li class="feature-item"><strong>Error Auto-Retry:</strong> Detects transient errors and retries with exponential backoff.</li>
-                <li class="feature-item"><strong>MCP Tools:</strong> Integration of MCP Tools is now available (Experimental).</li>
-                <li class="feature-item"><strong>System Prompt:</strong> Configure a custom system prompt to define AI behavior.</li>
-                <li class="feature-item"><strong>User Prompts:</strong> Create, save, and manage multiple user prompts simultaneously.</li>
-                <li class="feature-item"><strong>Terminal Commands:</strong> Enhanced terminal control and restrictions.</li>
-                <li class="feature-item"><strong>Auto-Update System:</strong> Stay up-to-date effortlessly via the Settings menu.</li>
-            </ul>
-        </section>
-
-        <div class="gif-container">
-            <img src="./images/gif_bowow.gif" alt="gif_bowow.gif">
-        </div>
-
-        <section class="content-block">
-            <h3>Usage</h3>
-            <ol style="list-style: decimal; padding-left: 20px; color: var(--text-color);">
-                <li style="margin-bottom: 10px;">Launch the app and open the Settings panel to configure your AI provider and API key, click done.</li>
-                <li style="margin-bottom: 10px;">Connect to a model (Gemini, OpenAI, Ollama, etc.).</li>
-                <li style="margin-bottom: 10px;">Open a project folder ( /new )</li>
-                <li style="margin-bottom: 10px;">Describe what you want to build — the agent will generate files, edit code, and run commands.</li>
-                <li style="margin-bottom: 10px;">Use F10 to toggle split-screen mode for multi-session management.</li>
-            </ol>
-        </section>
+  <div class="demo-frame">
+    <div class="demo-bar">
+      <span class="demo-dot"></span><span class="demo-dot"></span><span class="demo-dot"></span>
     </div>
+    <img src="./images/cat_talk.gif" alt="Bowow demo">
+  </div>
+</section>
 
-    <footer>
-        <div class="footer-content">
-            <img src="./images/bowow.png" alt="bowow.png" class="footer-logo">
-            <a href="https://github.com/YASSER-27" class="footer-link">Created by YASSER-27</a>
-            <div class="year-tag">2026</div>
+<section class="marquee-wrapper" id="features-section">
+  <div class="section-head">
+    <span class="tag">Capabilities</span>
+    <h3>Everything the agent brings to the table</h3>
+    <p>Multi-model, multi-session, and built to keep your project files honest.</p>
+  </div>
+  <div class="marquee-section">
+    <div class="marquee-row scroll-left">
+        <div class="marquee-content">
+            <article class="music-card">
+                <div class="card-cover"><img src="./images/cat_custom_04.png" style="width:100%;height:100%;object-fit:cover;"></div>
+                <div class="card-info">
+                    <div><h3 class="card-title">Multi-Model Support</h3><p class="card-subtitle">Gemini, OpenAI, Ollama & more</p></div>
+                    <div class="card-stats"><span class="stat-item">Core</span></div>
+                </div>
+            </article>
+            <article class="music-card">
+                <div class="card-cover"><img src="./images/cat_custom_05.png" style="width:100%;height:100%;object-fit:cover;"></div>
+                <div class="card-info">
+                    <div><h3 class="card-title">Split-Screen Mode</h3><p class="card-subtitle">4-pane view (F10)</p></div>
+                    <div class="card-stats"><span class="stat-item">UI</span></div>
+                </div>
+            </article>
+            <article class="music-card">
+                <div class="card-cover"><img src="./images/cat_custom_04.png" style="width:100%;height:100%;object-fit:cover;"></div>
+                <div class="card-info">
+                    <div><h3 class="card-title">Live File Editing</h3><p class="card-subtitle">Direct disk read/write/diff</p></div>
+                    <div class="card-stats"><span class="stat-item">IO</span></div>
+                </div>
+            </article>
+            <article class="music-card">
+                <div class="card-cover"><img src="./images/cat_custom_05.png" style="width:100%;height:100%;object-fit:cover;"></div>
+                <div class="card-info">
+                    <div><h3 class="card-title">Checkpoint System</h3><p class="card-subtitle">Rollback file changes</p></div>
+                    <div class="card-stats"><span class="stat-item">Safe</span></div>
+                </div>
+            </article>
+            <article class="music-card">
+                <div class="card-cover"><img src="./images/cat_custom_04.png" style="width:100%;height:100%;object-fit:cover;"></div>
+                <div class="card-info">
+                    <div><h3 class="card-title">Context Management</h3><p class="card-subtitle">Auto compaction & pruning</p></div>
+                    <div class="card-stats"><span class="stat-item">AI</span></div>
+                </div>
+            </article>
+            <article class="music-card">
+                <div class="card-cover"><img src="./images/cat_custom_05.png" style="width:100%;height:100%;object-fit:cover;"></div>
+                <div class="card-info">
+                    <div><h3 class="card-title">Error Auto-Retry</h3><p class="card-subtitle">Exponential backoff</p></div>
+                    <div class="card-stats"><span class="stat-item">Stable</span></div>
+                </div>
+            </article>
         </div>
-    </footer>
+        <div class="marquee-content">
+            <article class="music-card">
+                <div class="card-cover"><img src="./images/cat_custom_04.png" style="width:100%;height:100%;object-fit:cover;"></div>
+                <div class="card-info">
+                    <div><h3 class="card-title">Multi-Model Support</h3><p class="card-subtitle">Gemini, OpenAI, Ollama & more</p></div>
+                    <div class="card-stats"><span class="stat-item">Core</span></div>
+                </div>
+            </article>
+            <article class="music-card">
+                <div class="card-cover"><img src="./images/cat_custom_05.png" style="width:100%;height:100%;object-fit:cover;"></div>
+                <div class="card-info">
+                    <div><h3 class="card-title">Split-Screen Mode</h3><p class="card-subtitle">4-pane view (F10)</p></div>
+                    <div class="card-stats"><span class="stat-item">UI</span></div>
+                </div>
+            </article>
+            <article class="music-card">
+                <div class="card-cover"><img src="./images/cat_custom_04.png" style="width:100%;height:100%;object-fit:cover;"></div>
+                <div class="card-info">
+                    <div><h3 class="card-title">Live File Editing</h3><p class="card-subtitle">Direct disk read/write/diff</p></div>
+                    <div class="card-stats"><span class="stat-item">IO</span></div>
+                </div>
+            </article>
+            <article class="music-card">
+                <div class="card-cover"><img src="./images/cat_custom_05.png" style="width:100%;height:100%;object-fit:cover;"></div>
+                <div class="card-info">
+                    <div><h3 class="card-title">Checkpoint System</h3><p class="card-subtitle">Rollback file changes</p></div>
+                    <div class="card-stats"><span class="stat-item">Safe</span></div>
+                </div>
+            </article>
+            <article class="music-card">
+                <div class="card-cover"><img src="./images/cat_custom_04.png" style="width:100%;height:100%;object-fit:cover;"></div>
+                <div class="card-info">
+                    <div><h3 class="card-title">Context Management</h3><p class="card-subtitle">Auto compaction & pruning</p></div>
+                    <div class="card-stats"><span class="stat-item">AI</span></div>
+                </div>
+            </article>
+            <article class="music-card">
+                <div class="card-cover"><img src="./images/cat_custom_05.png" style="width:100%;height:100%;object-fit:cover;"></div>
+                <div class="card-info">
+                    <div><h3 class="card-title">Error Auto-Retry</h3><p class="card-subtitle">Exponential backoff</p></div>
+                    <div class="card-stats"><span class="stat-item">Stable</span></div>
+                </div>
+            </article>
+        </div>
+    </div>
+    <div class="marquee-row scroll-right">
+        <div class="marquee-content">
+            <article class="music-card">
+                <div class="card-cover"><img src="./images/cat_custom_04.png" style="width:100%;height:100%;object-fit:cover;"></div>
+                <div class="card-info">
+                    <div><h3 class="card-title">MCP Tools</h3><p class="card-subtitle">Experimental integration</p></div>
+                    <div class="card-stats"><span class="stat-item">Ext</span></div>
+                </div>
+            </article>
+            <article class="music-card">
+                <div class="card-cover"><img src="./images/cat_custom_05.png" style="width:100%;height:100%;object-fit:cover;"></div>
+                <div class="card-info">
+                    <div><h3 class="card-title">System Prompt</h3><p class="card-subtitle">Define AI behavior</p></div>
+                    <div class="card-stats"><span class="stat-item">Config</span></div>
+                </div>
+            </article>
+            <article class="music-card">
+                <div class="card-cover"><img src="./images/cat_custom_04.png" style="width:100%;height:100%;object-fit:cover;"></div>
+                <div class="card-info">
+                    <div><h3 class="card-title">User Prompts</h3><p class="card-subtitle">Manage multiple prompts</p></div>
+                    <div class="card-stats"><span class="stat-item">User</span></div>
+                </div>
+            </article>
+            <article class="music-card">
+                <div class="card-cover"><img src="./images/cat_custom_05.png" style="width:100%;height:100%;object-fit:cover;"></div>
+                <div class="card-info">
+                    <div><h3 class="card-title">Terminal Commands</h3><p class="card-subtitle">Enhanced control</p></div>
+                    <div class="card-stats"><span class="stat-item">Shell</span></div>
+                </div>
+            </article>
+            <article class="music-card">
+                <div class="card-cover"><img src="./images/cat_custom_04.png" style="width:100%;height:100%;object-fit:cover;"></div>
+                <div class="card-info">
+                    <div><h3 class="card-title">Auto-Update System</h3><p class="card-subtitle">Effortless updates</p></div>
+                    <div class="card-stats"><span class="stat-item">Sync</span></div>
+                </div>
+            </article>
+        </div>
+        <div class="marquee-content">
+            <article class="music-card">
+                <div class="card-cover"><img src="./images/cat_custom_04.png" style="width:100%;height:100%;object-fit:cover;"></div>
+                <div class="card-info">
+                    <div><h3 class="card-title">MCP Tools</h3><p class="card-subtitle">Experimental integration</p></div>
+                    <div class="card-stats"><span class="stat-item">Ext</span></div>
+                </div>
+            </article>
+            <article class="music-card">
+                <div class="card-cover"><img src="./images/cat_custom_05.png" style="width:100%;height:100%;object-fit:cover;"></div>
+                <div class="card-info">
+                    <div><h3 class="card-title">System Prompt</h3><p class="card-subtitle">Define AI behavior</p></div>
+                    <div class="card-stats"><span class="stat-item">Config</span></div>
+                </div>
+            </article>
+            <article class="music-card">
+                <div class="card-cover"><img src="./images/cat_custom_04.png" style="width:100%;height:100%;object-fit:cover;"></div>
+                <div class="card-info">
+                    <div><h3 class="card-title">User Prompts</h3><p class="card-subtitle">Manage multiple prompts</p></div>
+                    <div class="card-stats"><span class="stat-item">User</span></div>
+                </div>
+            </article>
+            <article class="music-card">
+                <div class="card-cover"><img src="./images/cat_custom_05.png" style="width:100%;height:100%;object-fit:cover;"></div>
+                <div class="card-info">
+                    <div><h3 class="card-title">Terminal Commands</h3><p class="card-subtitle">Enhanced control</p></div>
+                    <div class="card-stats"><span class="stat-item">Shell</span></div>
+                </div>
+            </article>
+            <article class="music-card">
+                <div class="card-cover"><img src="./images/cat_custom_04.png" style="width:100%;height:100%;object-fit:cover;"></div>
+                <div class="card-info">
+                    <div><h3 class="card-title">Auto-Update System</h3><p class="card-subtitle">Effortless updates</p></div>
+                    <div class="card-stats"><span class="stat-item">Sync</span></div>
+                </div>
+            </article>
+        </div>
+    </div>
+  </div>
+</section>
 
-    <script>
-        const matrixContainer = document.getElementById('matrix');
-        const columns = Math.floor(window.innerWidth / 20);
+<section class="section">
+  <div class="section-head">
+    <span class="tag">Preview</span>
+    <h3>Inside the app</h3>
+  </div>
+  <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(320px,1fr));">
+    <div class="demo-frame" style="margin:0;">
+      <div class="demo-bar"><span class="demo-dot"></span><span class="demo-dot"></span><span class="demo-dot"></span></div>
+      <img src="./images/bowow_desktop.png" alt="Bowow desktop preview">
+    </div>
+    <div class="demo-frame" style="margin:0;">
+      <div class="demo-bar"><span class="demo-dot"></span><span class="demo-dot"></span><span class="demo-dot"></span></div>
+      <img src="./images/bowow_desktop2.png" alt="Bowow desktop preview 2">
+    </div>
+  </div>
+</section>
 
-        for (let i = 0; i < columns; i++) {
-            const column = document.createElement('div');
-            column.className = 'matrix-column';
-            column.style.left = (i * 20) + 'px';
-            
-            let binaryStr = '';
-            for (let j = 0; j < 50; j++) {
-                binaryStr += Math.random() > 0.5 ? '1<br>' : '0<br>';
-            }
-            column.innerHTML = binaryStr;
-            
-            const duration = 5 + Math.random() * 10;
-            const delay = Math.random() * 5;
-            column.style.animationDuration = duration + 's';
-            column.style.animationDelay = '-' + delay + 's';
-            
-            matrixContainer.appendChild(column);
-        }
-    </script>
+<section class="section">
+  <div class="section-head">
+    <span class="tag">Get started</span>
+    <h3>Usage</h3>
+  </div>
+  <div class="steps">
+    <div class="step"><div class="num">01</div><h5>Configure your provider</h5><p>Open Settings, add your AI provider and API key, then click Done.</p></div>
+    <div class="step"><div class="num">02</div><h5>Connect a model</h5><p>Gemini, OpenAI, Ollama, or any supported backend.</p></div>
+    <div class="step"><div class="num">03</div><h5>Open a project</h5><p>Use <code>/new</code> to open a project folder.</p></div>
+    <div class="step"><div class="num">04</div><h5>Describe what to build</h5><p>The agent generates files, edits code, and runs commands.</p></div>
+    <div class="step"><div class="num">05</div><h5>Go multi-session</h5><p>Press F10 to toggle split-screen mode.</p></div>
+  </div>
+</section>
+
+<footer>
+  <div class="footer-grid">
+    <div>
+      <div class="footer-brand">
+        <img src="./images/cat_view.png" class="brand-mark" alt="Bowow Logo">
+        <h4>BOWOW</h4>
+      </div>
+      <p>An open source coding agent that reads, writes, and diffs your project files — built for developers who want a local, model-agnostic build partner.</p>
+    </div>
+    <div class="footer-col">
+      <h5>Links</h5>
+      <a href="#" onclick="return false;">Home</a>
+      <a href="#features-section">Features</a>
+      <a href="https://github.com/YASSER-27/Bowow/releases" target="_blank" rel="noopener">Download</a>
+    </div>
+    <div class="footer-col">
+      <h5>Community</h5>
+      <a href="https://github.com/YASSER-27" target="_blank" rel="noopener">Created by YASSER-27</a>
+      <a href="https://github.com/YASSER-27/Bowow" target="_blank" rel="noopener">Contribute on GitHub</a>
+    </div>
+  </div>
+  <div class="footer-bottom">
+    <span>BOWOW — Open Source Coding Agent</span>
+    <span>2026</span>
+  </div>
+</footer>
+
+<!-- Modal: Updates & Improvements -->
+<div class="modal-overlay" id="modal-updates" onclick="closeOnBackdrop(event,'modal-updates')">
+  <div class="modal-box">
+    <button class="modal-close" onclick="closeModal('modal-updates')">&times;</button>
+    <span class="tag">Changelog</span>
+    <h2>Updates &amp; Improvements</h2>
+    <ul class="modal-list">
+      <li><span class="dot">▹</span><span><strong>Performance Optimization —</strong> Resolved performance lags; the application is now stable.</span></li>
+      <li><span class="dot">▹</span><span><strong>New Settings Window —</strong> Introduced a dedicated Settings window with a significantly improved and cleaner interface.</span></li>
+      <li><span class="dot">▹</span><span><strong>RTL Language Support —</strong> Fixed Arabic text rendering issues; text now correctly aligns to the right.</span></li>
+      <li><span class="dot">▹</span><span><strong>Refined UI —</strong> Removed borders from AI messages for a cleaner, modern, elegant look.</span></li>
+      <li><span class="dot">▹</span><span><strong>Easter Egg —</strong> Head over to Settings and click on the "Bowow" name to see a little surprise!</span></li>
+      <li><span class="dot">▹</span><span><strong>Persistence —</strong> Chat sessions are now persistent. Your conversations are saved automatically.</span></li>
+    </ul>
+  </div>
+</div>
+
+<!-- Modal: Features -->
+<div class="modal-overlay" id="modal-features" onclick="closeOnBackdrop(event,'modal-features')">
+  <div class="modal-box">
+    <button class="modal-close" onclick="closeModal('modal-features')">&times;</button>
+    <span class="tag">Capabilities</span>
+    <h2>Features</h2>
+    <ul class="modal-list">
+      <li><span class="dot">▹</span><span><strong>Multi-Model Support —</strong> Works with Gemini, OpenAI, OpenRouter, Ollama, and llama.cpp backends.</span></li>
+      <li><span class="dot">▹</span><span><strong>Split-Screen Mode —</strong> Toggle a 4-pane view (F10) to manage multiple build sessions simultaneously.</span></li>
+      <li><span class="dot">▹</span><span><strong>Live File Editing —</strong> The agent reads, writes, and diffs project files directly on disk.</span></li>
+      <li><span class="dot">▹</span><span><strong>Checkpoint System —</strong> Undo file changes with checkpoint-based rollback.</span></li>
+      <li><span class="dot">▹</span><span><strong>Context Management —</strong> Automatic conversation compaction and pruning.</span></li>
+      <li><span class="dot">▹</span><span><strong>Error Auto-Retry —</strong> Detects transient errors and retries with exponential backoff.</span></li>
+      <li><span class="dot">▹</span><span><strong>MCP Tools —</strong> Integration of MCP Tools is now available (Experimental).</span></li>
+      <li><span class="dot">▹</span><span><strong>System Prompt —</strong> Configure a custom system prompt to define AI behavior.</span></li>
+      <li><span class="dot">▹</span><span><strong>User Prompts —</strong> Create, save, and manage multiple user prompts simultaneously.</span></li>
+      <li><span class="dot">▹</span><span><strong>Terminal Commands —</strong> Enhanced terminal control and restrictions.</span></li>
+      <li><span class="dot">▹</span><span><strong>Auto-Update System —</strong> Stay up-to-date effortlessly via the Settings menu.</span></li>
+    </ul>
+  </div>
+</div>
+
+<script>
+  // matrix background — 101101001 pattern
+  const container = document.getElementById('matrix');
+  const cols = Math.floor(window.innerWidth / 22);
+  const pattern = '101101001';
+  for(let i=0;i<cols;i++){
+    const col = document.createElement('div');
+    col.className = 'matrix-column';
+    col.style.left = (i*22)+'px';
+    let content = '';
+    for(let j=0;j<25;j++){ content += pattern + '<br>'; }
+    col.innerHTML = content;
+    const dur = 6 + Math.random()*10;
+    const delay = Math.random()*6;
+    col.style.animationDuration = dur+'s';
+    col.style.animationDelay = '-'+delay+'s';
+    container.appendChild(col);
+  }
+
+  function openModal(id){
+    document.getElementById(id).classList.add('active');
+    document.body.style.overflow = 'hidden';
+  }
+  function closeModal(id){
+    document.getElementById(id).classList.remove('active');
+    document.body.style.overflow = '';
+  }
+  function closeOnBackdrop(e,id){
+    if(e.target.id === id) closeModal(id);
+  }
+  document.addEventListener('keydown', e=>{
+    if(e.key === 'Escape'){
+      closeModal('modal-updates');
+      closeModal('modal-features');
+    }
+  });
+</script>
 </body>
 </html>
