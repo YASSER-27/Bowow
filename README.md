@@ -19,11 +19,11 @@
     </a>
     <img src="https://img.shields.io/badge/TypeScript-181818?style=for-the-badge&logo=typescript&logoColor=3178C6" alt="TypeScript">
     <img src="https://img.shields.io/github/actions/workflow/status/YASSER-27/Bowow/main.yml?style=for-the-badge" alt="Build Status">
-    <img src="https://img.shields.io/badge/version-1.5.1-FF5A5F.svg?style=for-the-badge" alt="Version">
+    <img src="https://img.shields.io/badge/version-1.5.2-FF5A5F.svg?style=for-the-badge" alt="Version">
 
 <p align="center">
   <a href="https://github.com/YASSER-27/Bowow/releases/latest">
-    <img src="https://img.shields.io/badge/Bowow - 1.5.1-blue?style=for-the-badge&logo=github" alt="Download">
+    <img src="https://img.shields.io/badge/Bowow - 1.5.2-blue?style=for-the-badge&logo=github" alt="Download">
   </a>
 </p>
 
