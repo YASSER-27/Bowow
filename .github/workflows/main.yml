@@ -1,16 +1,35 @@
 name: Build and Release
-on: [push]
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+
       - run: npm install
       - run: npm run build:win
-      - uses: actions/upload-artifact@v4
+
+      - name: Upload build artifact (for debugging)
+        uses: actions/upload-artifact@v4
         with:
           name: windows-build
           path: release/
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/*.exe
+            release/*.blockmap
+            release/latest.yml

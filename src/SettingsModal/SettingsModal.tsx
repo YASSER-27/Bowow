@@ -633,13 +633,19 @@ export default function SettingsModal({ onClose, inline }: Props) {
       )}
       {updateStatus?.status === 'error' && (
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
-          <div style={{ fontSize: 'var(--font-sm)', color: '#f87171' }}>
+          <div style={{ fontSize: 'var(--font-sm)', color: '#f87171', maxWidth: '90%', wordBreak: 'break-word' }}>
             {updateStatus.message || 'Update check failed'}
           </div>
-          <button onClick={() => { setChecking(true); window.electronAPI?.checkForUpdate() }}
-            style={{ padding: '10px 32px', borderRadius: 8, border: '1px solid #555', background: 'transparent', color: '#ccc', cursor: 'pointer', fontSize: 'var(--font-md)', fontFamily: 'inherit' }}>
-            Retry
-          </button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button onClick={() => { setChecking(true); window.electronAPI?.checkForUpdate() }}
+              style={{ padding: '10px 20px', borderRadius: 8, border: '1px solid #555', background: 'transparent', color: '#ccc', cursor: 'pointer', fontSize: 'var(--font-md)', fontFamily: 'inherit' }}>
+              Retry
+            </button>
+            <button onClick={() => window.open('https://github.com/YASSER-27/Bowow/releases/latest', '_blank')}
+              style={{ padding: '10px 20px', borderRadius: 8, border: 'none', background: '#4ade80', color: '#000', cursor: 'pointer', fontSize: 'var(--font-md)', fontFamily: 'inherit', fontWeight: 600 }}>
+              Download from GitHub
+            </button>
+          </div>
         </div>
       )}
     </div>

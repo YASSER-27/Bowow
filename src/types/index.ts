@@ -179,4 +179,5 @@ export interface ImportEntry {
     percent?: number
     bytesPerSecond?: number
     message?: string
+    downloadUrl?: string
   }

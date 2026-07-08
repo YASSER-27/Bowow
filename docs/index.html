@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>page bowow</title>
+    <style>
+        :root {
+            --bg-color: #121212;
+            --glass-grad-1: #000000;
+            --glass-grad-2: #222222;
+            --accent-color: #ffffff;
+            --text-color: #e0e0e0;
+            --matrix-color: rgba(255, 255, 255, 0.05);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            overflow-x: hidden;
+            line-height: 1.6;
+        }
+
+        /* Matrix Background */
+        .matrix-bg {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: -2;
+            overflow: hidden;
+            pointer-events: none;
+            font-family: monospace;
+            font-size: 14px;
+            color: var(--matrix-color);
+            user-select: none;
+        }
+
+        .matrix-column {
+            position: absolute;
+            top: -100%;
+            width: 20px;
+            text-align: center;
+            animation: matrix-fall linear infinite;
+        }
+
+        @keyframes matrix-fall {
+            0% { transform: translateY(0); }
+            100% { transform: translateY(200vh); }
+        }
+
+        /* Glass Gradient Background */
+        .glass-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: -1;
+            background: linear-gradient(135deg, var(--glass-grad-1), var(--glass-grad-2));
+            opacity: 0.8;
+            animation: blur-pulse 8s ease-in-out infinite alternate;
+        }
+
+        @keyframes blur-pulse {
+            0% { backdrop-filter: blur(5px); }
+            100% { backdrop-filter: blur(15px); }
+        }
+
+        /* Navigation */
+        nav {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 1rem 5%;
+            background: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(10px);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .nav-brand {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .nav-brand img {
+            height: 50px;
+            width: auto;
+        }
+
+        .nav-brand h1 {
+            font-size: 2rem;
+            letter-spacing: 4px;
+            font-weight: 900;
+            color: #fff;
+            text-shadow: 0 0 10px rgba(255,255,255,0.3);
+        }
+
+        /* Hero Section (Thumbnail Large) */
+        .hero {
+            position: relative;
+            height: 80vh;
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            background: url('./images/cat_talk.gif') no-repeat center center;
+            background-size: cover;
+            margin-bottom: 4rem;
+            box-shadow: inset 0 0 100px #000;
+        }
+
+        .hero::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.4);
+        }
+
+        .hero-content {
+            position: relative;
+            z-index: 1;
+            padding: 20px;
+        }
+
+        .download-btn {
+            display: inline-block;
+            padding: 15px 40px;
+            background: #fff;
+            color: #000;
+            text-decoration: none;
+            font-weight: bold;
+            border-radius: 5px;
+            font-size: 1.2rem;
+            transition: all 0.3s ease;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            box-shadow: 0 0 20px rgba(255,255,255,0.2);
+        }
+
+        .download-btn:hover {
+            background: #e0e0e0;
+            transform: translateY(-3px);
+            box-shadow: 0 5px 25px rgba(255,255,255,0.4);
+        }
+
+        /* Content Sections */
+        .container {
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 0 20px;
+        }
+
+        .section-title {
+            font-size: 2.5rem;
+            margin-bottom: 2rem;
+            text-align: center;
+            color: #fff;
+            border-bottom: 2px solid rgba(255,255,255,0.1);
+            padding-bottom: 10px;
+        }
+
+        .grid-cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 30px;
+            margin-bottom: 4rem;
+        }
+
+        .card {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            overflow: hidden;
+            transition: transform 0.3s ease;
+        }
+
+        .card:hover {
+            border-color: rgba(255, 255, 255, 0.3);
+        }
+
+        .card img {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        .content-block {
+            background: rgba(0, 0, 0, 0.4);
+            padding: 40px;
+            border-radius: 15px;
+            margin-bottom: 4rem;
+            backdrop-filter: blur(5px);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .content-block h3 {
+            color: #fff;
+            margin-bottom: 1.5rem;
+            font-size: 1.8rem;
+        }
+
+        .content-block ul {
+            list-style: none;
+        }
+
+        .content-block li {
+            margin-bottom: 12px;
+            padding-left: 25px;
+            position: relative;
+        }
+
+        .content-block li::before {
+            content: '▹';
+            position: absolute;
+            left: 0;
+            color: #888;
+        }
+
+        .feature-item strong {
+            color: #fff;
+        }
+
+        /* Big Thumbnail GIF */
+        .gif-container {
+            width: 100%;
+            max-width: 900px;
+            margin: 4rem auto;
+            border-radius: 15px;
+            overflow: hidden;
+            box-shadow: 0 0 50px rgba(0,0,0,0.5);
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .gif-container img {
+            width: 100%;
+            display: block;
+        }
+
+        /* Footer */
+        footer {
+            background: rgba(0, 0, 0, 0.8);
+            padding: 4rem 5% 2rem;
+            text-align: center;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .footer-content {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+        }
+
+        .footer-logo {
+            height: 60px;
+            width: auto;
+        }
+
+        .footer-link {
+            color: #fff;
+            text-decoration: none;
+            font-size: 1.1rem;
+            opacity: 0.7;
+            transition: opacity 0.3s;
+        }
+
+        .footer-link:hover {
+            opacity: 1;
+        }
+
+        .year-tag {
+            margin-top: 20px;
+            font-size: 0.9rem;
+            color: rgba(255, 255, 255, 0.3);
+            letter-spacing: 2px;
+        }
+
+        /* Responsive adjustments */
+        @media (max-width: 768px) {
+            .hero { height: 60vh; }
+            .nav-brand h1 { font-size: 1.5rem; }
+            .section-title { font-size: 2rem; }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="matrix-bg" id="matrix"></div>
+    <div class="glass-overlay"></div>
+
+    <nav>
+        <div class="nav-brand">
+            <img src="./images/cat_view.png" alt="cat_view.png">
+            <h1>BOWOW</h1>
+        </div>
+    </nav>
+
+    <section class="hero">
+        <div class="hero-content">
+            <a href="https://github.com/YASSER-27/Bowow/releases" class="download-btn">Download Now</a>
+        </div>
+    </section>
+
+    <div class="container">
+        <section class="content-block">
+            <h2 class="section-title">Updates & Improvements</h2>
+            <ul>
+                <li><strong>Performance Optimization:</strong> Resolved performance lags; the application is now stable.</li>
+                <li><strong>New Settings Window:</strong> Introduced a dedicated Settings window with a significantly improved and cleaner user interface.</li>
+                <li><strong>RTL Language Support:</strong> Fixed Arabic text rendering issues; text now correctly aligns to the right.</li>
+                <li><strong>Refined UI:</strong> Removed borders from AI messages for a cleaner, modern, and elegant look.</li>
+                <li><strong>Easter Egg:</strong> Head over to Settings and click on the "Bowow" name to see a little surprise!</li>
+                <li><strong>Persistence:</strong> Chat sessions are now persistent. Your conversations are saved automatically.</li>
+            </ul>
+        </section>
+
+        <h2 class="section-title">Preview</h2>
+        <div class="grid-cards">
+            <div class="card">
+                <img src="./images/bowow_desktop.png" alt="bowow_desktop.png">
+            </div>
+            <div class="card">
+                <img src="./images/bowow_desktop2.png" alt="bowow_desktop2.png">
+            </div>
+        </div>
+
+        <section class="content-block">
+            <h3>Features</h3>
+            <ul>
+                <li class="feature-item"><strong>Multi-Model Support:</strong> Works with Gemini, OpenAI, OpenRouter, Ollama, and llama.cpp backends.</li>
+                <li class="feature-item"><strong>Split-Screen Mode:</strong> Toggle a 4-pane view (F10) to manage multiple build sessions simultaneously.</li>
+                <li class="feature-item"><strong>Live File Editing:</strong> The agent reads, writes, and diffs project files directly on disk.</li>
+                <li class="feature-item"><strong>Checkpoint System:</strong> Undo file changes with checkpoint-based rollback.</li>
+                <li class="feature-item"><strong>Context Management:</strong> Automatic conversation compaction and pruning.</li>
+                <li class="feature-item"><strong>Error Auto-Retry:</strong> Detects transient errors and retries with exponential backoff.</li>
+                <li class="feature-item"><strong>MCP Tools:</strong> Integration of MCP Tools is now available (Experimental).</li>
+                <li class="feature-item"><strong>System Prompt:</strong> Configure a custom system prompt to define AI behavior.</li>
+                <li class="feature-item"><strong>User Prompts:</strong> Create, save, and manage multiple user prompts simultaneously.</li>
+                <li class="feature-item"><strong>Terminal Commands:</strong> Enhanced terminal control and restrictions.</li>
+                <li class="feature-item"><strong>Auto-Update System:</strong> Stay up-to-date effortlessly via the Settings menu.</li>
+            </ul>
+        </section>
+
+        <div class="gif-container">
+            <img src="./images/gif_bowow.gif" alt="gif_bowow.gif">
+        </div>
+
+        <section class="content-block">
+            <h3>Usage</h3>
+            <ol style="list-style: decimal; padding-left: 20px; color: var(--text-color);">
+                <li style="margin-bottom: 10px;">Launch the app and open the Settings panel to configure your AI provider and API key, click done.</li>
+                <li style="margin-bottom: 10px;">Connect to a model (Gemini, OpenAI, Ollama, etc.).</li>
+                <li style="margin-bottom: 10px;">Open a project folder ( /new )</li>
+                <li style="margin-bottom: 10px;">Describe what you want to build — the agent will generate files, edit code, and run commands.</li>
+                <li style="margin-bottom: 10px;">Use F10 to toggle split-screen mode for multi-session management.</li>
+            </ol>
+        </section>
+    </div>
+
+    <footer>
+        <div class="footer-content">
+            <img src="./images/bowow.png" alt="bowow.png" class="footer-logo">
+            <a href="https://github.com/YASSER-27" class="footer-link">Created by YASSER-27</a>
+            <div class="year-tag">2026</div>
+        </div>
+    </footer>
+
+    <script>
+        const matrixContainer = document.getElementById('matrix');
+        const columns = Math.floor(window.innerWidth / 20);
+
+        for (let i = 0; i < columns; i++) {
+            const column = document.createElement('div');
+            column.className = 'matrix-column';
+            column.style.left = (i * 20) + 'px';
+            
+            let binaryStr = '';
+            for (let j = 0; j < 50; j++) {
+                binaryStr += Math.random() > 0.5 ? '1<br>' : '0<br>';
+            }
+            column.innerHTML = binaryStr;
+            
+            const duration = 5 + Math.random() * 10;
+            const delay = Math.random() * 5;
+            column.style.animationDuration = duration + 's';
+            column.style.animationDelay = '-' + delay + 's';
+            
+            matrixContainer.appendChild(column);
+        }
+    </script>
+</body>
+</html>

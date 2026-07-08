@@ -2487,8 +2487,8 @@ export default function BuildAgent({ buildId }: { buildId: number }) {
       </div>
 
       <style>{`.sd{display:flex;align-items:center;justify-content:center;width:18px;height:18px;cursor:pointer;pointer-events:auto}.sd::after{content:'';display:block;width:6px;height:2px;border-radius:2px;background:var(--sd-bg,#aaa);transition:all .2s ease}.sd:hover::after{width:14px;height:3px;background:#fff}.sd[data-has]{--sd-bg:#22c55e}.sd[data-active]::after{width:10px;height:3px;background:var(--sd-bg,#fff)}*{scrollbar-width:thin;scrollbar-color:#444 transparent}*::-webkit-scrollbar{width:6px;height:6px}*::-webkit-scrollbar-track{background:transparent}*::-webkit-scrollbar-thumb{background:#444;border-radius:3px}*::-webkit-scrollbar-thumb:hover{background:#555}.info-modal{width:380px;max-width:90vw;background:#121212;border:1px solid #2a2a2a;border-radius:12px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.6)}@keyframes shimmerBg{0%{background-position:200% 0}100%{background-position:-200% 0}}.import-overlay{position:fixed;inset:0;z-index:50000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.5)}`}</style>
-      {/* Scroll indicators — user messages only */}
-      {userTimeline.length > 1 && (
+      {/* Scroll indicators — user messages only, hidden when settings open */}
+      {!showSettings && userTimeline.length > 1 && (
         <div style={{
           position: 'absolute', right: 7, top: '50%', transform: 'translateY(-50%)',
           display: 'flex', flexDirection: 'column', gap: 4,

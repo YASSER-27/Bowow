@@ -1,9 +1,10 @@
 ﻿import { app, BrowserWindow, Menu, nativeImage, ipcMain, dialog, shell } from 'electron'
-import { autoUpdater } from 'electron-updater'
 import path from 'node:path'
-import { exec } from 'node:child_process'
+import { exec, spawn } from 'node:child_process'
 import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
+import { createWriteStream } from 'node:fs'
+import https from 'node:https'
 import WebSocket from 'ws'
 
 process.env.DIST = path.join(__dirname, '../dist')
@@ -325,48 +326,109 @@ function createWindow() {
   })
 }
 
-// ── Auto Update ──
-autoUpdater.autoDownload = false
-autoUpdater.autoInstallOnAppQuit = false
+// ── Custom Update System (GitHub API) ──
+const GITHUB_OWNER = 'YASSER-27'
+const GITHUB_REPO = 'Bowow'
+const API_BASE = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}`
+const currentVersion = app.getVersion()
+let pendingUpdatePath: string | null = null
+let pendingUpdateVersion: string | null = null
+let pendingUpdateUrl: string | null = null
 
-autoUpdater.on('checking-for-update', () => {
-  mainWindow?.webContents.send('update-status', { status: 'checking' })
-})
-
-autoUpdater.on('update-available', (info) => {
-  mainWindow?.webContents.send('update-status', { status: 'available', version: info.version, releaseDate: info.releaseDate, releaseNotes: info.releaseNotes })
-})
-
-autoUpdater.on('update-not-available', () => {
-  mainWindow?.webContents.send('update-status', { status: 'not-available' })
-})
-
-autoUpdater.on('download-progress', (progress) => {
-  mainWindow?.webContents.send('update-status', { status: 'downloading', percent: progress.percent, bytesPerSecond: progress.bytesPerSecond })
-})
-
-autoUpdater.on('update-downloaded', (info) => {
-  mainWindow?.webContents.send('update-status', { status: 'downloaded', version: info.version })
-})
-
-autoUpdater.on('error', (err) => {
-  const isNoRelease = err.message?.includes('latest.yml') || err.message?.includes('404')
-  mainWindow?.webContents.send('update-status', {
-    status: 'error',
-    message: isNoRelease ? 'No published release found on GitHub. Publish a release first.' : err.message,
+function fetchJSON(url: string): Promise<any> {
+  return new Promise((resolve, reject) => {
+    https.get(url, { headers: { 'User-Agent': 'Bowow', 'Accept': 'application/vnd.github.v3+json' } }, (res) => {
+      let data = ''
+      res.on('data', chunk => data += chunk)
+      res.on('end', () => {
+        if (res.statusCode === 404) reject(new Error('No release found on GitHub'))
+        else if (res.statusCode !== 200) reject(new Error(`GitHub API error ${res.statusCode}`))
+        else resolve(JSON.parse(data))
+      })
+    }).on('error', reject)
   })
-})
+}
 
 ipcMain.handle('check-for-update', async () => {
-  autoUpdater.checkForUpdates()
+  mainWindow?.webContents.send('update-status', { status: 'checking' })
+  try {
+    const release = await fetchJSON(`${API_BASE}/releases/latest`)
+    const tagVersion = release.tag_name.replace(/^v/, '')
+    if (tagVersion === currentVersion) {
+      mainWindow?.webContents.send('update-status', { status: 'not-available' })
+      return
+    }
+    const asset = release.assets.find((a: any) =>
+      a.name.endsWith('.exe') && !a.name.includes('blockmap') && !a.name.includes('unpacked')
+    )
+    if (!asset) throw new Error('No installer found in the latest release')
+    pendingUpdateVersion = tagVersion
+    pendingUpdateUrl = asset.browser_download_url
+    pendingUpdatePath = null
+    mainWindow?.webContents.send('update-status', {
+      status: 'available',
+      version: tagVersion,
+      downloadUrl: asset.browser_download_url,
+    })
+  } catch (err: any) {
+    mainWindow?.webContents.send('update-status', { status: 'error', message: err.message })
+  }
 })
 
 ipcMain.handle('download-update', async () => {
-  autoUpdater.downloadUpdate()
+  if (!pendingUpdateVersion || !pendingUpdateUrl) {
+    mainWindow?.webContents.send('update-status', { status: 'error', message: 'No update available to download' })
+    return
+  }
+  try {
+    const url = pendingUpdateUrl
+    const dest = path.join(app.getPath('temp'), `bowow-update-${pendingUpdateVersion}.exe`)
+
+    await new Promise<void>((resolve, reject) => {
+      https.get(url, { headers: { 'User-Agent': 'Bowow' } }, (res) => {
+        if (res.statusCode !== 200) { reject(new Error(`Download failed: ${res.statusCode}`)); return }
+        const total = parseInt(res.headers['content-length'] || '0', 10)
+        let downloaded = 0
+        const fileStream = createWriteStream(dest)
+        res.on('data', (chunk) => {
+          downloaded += chunk.length
+          if (total > 0) {
+            mainWindow?.webContents.send('update-status', {
+              status: 'downloading',
+              percent: Math.round((downloaded / total) * 100),
+              bytesPerSecond: 0,
+            })
+          }
+        })
+        res.pipe(fileStream)
+        fileStream.on('finish', () => { fileStream.close(); resolve() })
+        fileStream.on('error', reject)
+      }).on('error', reject)
+    })
+
+    pendingUpdatePath = dest
+    mainWindow?.webContents.send('update-status', {
+      status: 'downloaded',
+      version: pendingUpdateVersion,
+    })
+  } catch (err: any) {
+    mainWindow?.webContents.send('update-status', { status: 'error', message: err.message })
+  }
 })
 
 ipcMain.handle('install-update', async () => {
-  autoUpdater.quitAndInstall()
+  if (!pendingUpdatePath) {
+    mainWindow?.webContents.send('update-status', { status: 'error', message: 'No update downloaded yet' })
+    return
+  }
+  try {
+    const installerPath = pendingUpdatePath
+    pendingUpdatePath = null
+    spawn(installerPath, ['/S', '--updated'], { detached: true, stdio: 'ignore' }).unref()
+    app.quit()
+  } catch (err: any) {
+    mainWindow?.webContents.send('update-status', { status: 'error', message: err.message })
+  }
 })
 
 app.whenReady().then(() => {
@@ -374,7 +436,26 @@ app.whenReady().then(() => {
   createWindow()
   // Check for updates silently on start (production only)
   if (app.isPackaged) {
-    setTimeout(() => autoUpdater.checkForUpdates().catch(() => {}), 5000)
+    setTimeout(async () => {
+      try {
+        const release = await fetchJSON(`${API_BASE}/releases/latest`)
+        const tagVersion = release.tag_name.replace(/^v/, '')
+        if (tagVersion !== currentVersion) {
+          const asset = release.assets.find((a: any) =>
+            a.name.endsWith('.exe') && !a.name.includes('blockmap') && !a.name.includes('unpacked')
+          )
+          if (asset) {
+            pendingUpdateVersion = tagVersion
+            pendingUpdateUrl = asset.browser_download_url
+            mainWindow?.webContents.send('update-status', {
+              status: 'available',
+              version: tagVersion,
+              downloadUrl: asset.browser_download_url,
+            })
+          }
+        }
+      } catch { /* silent fail on startup */ }
+    }, 5000)
   }
 })
 
