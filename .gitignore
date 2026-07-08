@@ -5,6 +5,3 @@ release/
 .env
 *.log
 dist-types/
-assets_img/
-Bowow.wav/
-docs/
